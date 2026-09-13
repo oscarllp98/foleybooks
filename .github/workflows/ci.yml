@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
 
 permissions:
   contents: read
@@ -46,3 +46,49 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  # Per AGENTS.md §11: build each backend module's image and publish to GHCR.
+  # Modules without a Dockerfile yet (auth/catalog/order arrive in phases 1-3)
+  # are skipped by the gate below and picked up automatically once scaffolded.
+  docker:
+    name: Images → GHCR (${{ matrix.module }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - discovery-service
+          - api-gateway
+          - auth-service
+          - catalog-service
+          - order-service
+    steps:
+      - uses: actions/checkout@v7
+      - id: gate
+        name: Detect module Dockerfile
+        run: echo "present=$([ -f "backend/${{ matrix.module }}/Dockerfile" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Setup buildx
+        if: steps.gate.outputs.present == 'true'
+        uses: docker/setup-buildx-action@v4
+      - name: Login to GHCR
+        if: steps.gate.outputs.present == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        if: steps.gate.outputs.present == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: backend
+          file: backend/${{ matrix.module }}/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.module }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.module }}:latest

@@ -1,8 +1,8 @@
 # Architecture — Foley Books
 
 Skeleton delivered with P-07; keep in sync whenever a module, route, or integration
-changes (diagrams updated alongside ADRs). Stack facts come from `AGENTS.md` §2–§4;
-decisions from [`adr/`](adr/).
+changes (diagrams updated alongside ADRs). Stack facts follow the repository's
+engineering conventions; decisions are tracked in [`adr/`](adr/).
 
 ## 1. System context (C4 level 1)
 
@@ -57,9 +57,8 @@ flowchart TB
     end
 
     browser --> spa
-    spa -->|HTTP/JSON /api/v1/*| gw
+    spa -->|HTTP/JSON /api/v1/*<br/>Bearer access token relayed, not validated| gw
 
-    auth -.->|RS256-signed access tokens<br/>validated by JWKS| gw
     gw -->|/api/v1/auth/**| auth
     gw -->|/api/v1/books/** /api/v1/categories/**| catalog
     gw -->|/api/v1/cart/**| order
@@ -102,8 +101,8 @@ flowchart TB
 
 ## 3. Component view (C4 level 3)
 
-Per-service internals follow the package-by-feature layout mandated in
-`AGENTS.md` §3 (`api → service → repository`, entities never crossing the HTTP
+Per-service internals follow the package-by-feature layout mandated by this
+repository (`api → service → repository`, entities never crossing the HTTP
 boundary). Detailed component diagrams will be added per service in their specs
 (auth, catalog, order) — this section is intentionally the layout, not invented
 detail.
@@ -163,6 +162,6 @@ sequenceDiagram
 
 - [`docs/adr/`](adr/) — decision records (Eureka security: ADR-006; more land with
   each spec phase)
-- [`specs/001-foleybooks-mvp/plan.md`](../specs/001-foleybooks-mvp/plan.md) — module
-  structure, endpoint map, technical decisions D-01..D-15
-- [`AGENTS.md`](../AGENTS.md) — engineering conventions (layers, security, tests)
+- Module structure, endpoint map and technical decisions (D-01..D-15) are defined in
+  the Spec 001 plan; product requirements live in the spec — both are maintained
+  outside the public repository.

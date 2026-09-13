@@ -62,15 +62,13 @@ services:
       start_period: 10s
 
   mailpit:
-    image: axllent/mailpit:latest
+    image: axllent/mailpit:v1.31.1
     restart: unless-stopped
     ports:
       # Demo inbox UI (public per C27); SMTP (:1025) stays network-internal.
       - "8025:8025"
-    environment:
-      MP_UI_ALLOWED_NETWORKS: 0.0.0.0/0
     healthcheck:
-      test: ["CMD", "/mailpit", "healthcheck"]
+      test: ["CMD", "/mailpit", "readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
