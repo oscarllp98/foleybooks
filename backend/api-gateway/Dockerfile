@@ -15,7 +15,11 @@ RUN java -Djarmode=layertools -jar app.jar extract
 
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-RUN useradd --system --uid 1001 spring
+# curl: required by the docker-compose healthcheck against /actuator/health
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 1001 spring
 COPY --from=extract --chown=spring:spring /app/dependencies/ ./
 COPY --from=extract --chown=spring:spring /app/spring-boot-loader/ ./
 COPY --from=extract --chown=spring:spring /app/snapshot-dependencies/ ./

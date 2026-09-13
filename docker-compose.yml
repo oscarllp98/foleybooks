@@ -1,0 +1,225 @@
+# Foley Books local stack (P-04).
+#
+# Port publishing (C27): ONLY the gateway (:8080) and the Mailpit UI (:8025)
+# are reachable from the host. The registry, domain services and databases stay
+# network-internal — service-to-service traffic uses compose DNS names
+# (discovery-service, auth-service, catalog-db, …). The plan's :5432/:5433/:5434
+# per-database split exists so each Postgres owns one user, one database and one
+# volume (C18); inside the network every instance answers on 5432.
+#
+# Secrets come from .env (gitignored); .env.example documents every variable.
+# Missing required secrets fail startup immediately (C19).
+
+name: foleybooks
+
+services:
+  auth-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AUTH_DB_NAME:?set in .env}
+      POSTGRES_USER: ${AUTH_DB_USER:?set in .env}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?set in .env}
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  catalog-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CATALOG_DB_NAME:?set in .env}
+      POSTGRES_USER: ${CATALOG_DB_USER:?set in .env}
+      POSTGRES_PASSWORD: ${CATALOG_DB_PASSWORD:?set in .env}
+    volumes:
+      - catalog-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  order-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ORDER_DB_NAME:?set in .env}
+      POSTGRES_USER: ${ORDER_DB_USER:?set in .env}
+      POSTGRES_PASSWORD: ${ORDER_DB_PASSWORD:?set in .env}
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      # Demo inbox UI (public per C27); SMTP (:1025) stays network-internal.
+      - "8025:8025"
+    environment:
+      MP_UI_ALLOWED_NETWORKS: 0.0.0.0/0
+    healthcheck:
+      test: ["CMD", "/mailpit", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  discovery-service:
+    build:
+      context: ./backend
+      dockerfile: discovery-service/Dockerfile
+    image: foleybooks/discovery-service:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
+      EUREKA_SECURITY_USERNAME: ${EUREKA_SECURITY_USERNAME:?set in .env}
+      EUREKA_SECURITY_PASSWORD: ${EUREKA_SECURITY_PASSWORD:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8761/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  api-gateway:
+    build:
+      context: ./backend
+      dockerfile: api-gateway/Dockerfile
+    image: foleybooks/api-gateway:local
+    restart: unless-stopped
+    ports:
+      # Single public entrypoint for the frontend (C27).
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?set in .env}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?set in .env}
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+    depends_on:
+      discovery-service:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  auth-service:
+    build:
+      context: ./backend
+      dockerfile: auth-service/Dockerfile
+    image: foleybooks/auth-service:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?set in .env}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?set in .env}
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+      # Production only — dev auto-generates the RSA keypair at startup (AGENTS.md §5):
+      # JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
+      # JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://auth-db:5432/${AUTH_DB_NAME:?set in .env}
+      SPRING_DATASOURCE_USERNAME: ${AUTH_DB_USER:?set in .env}
+      SPRING_DATASOURCE_PASSWORD: ${AUTH_DB_PASSWORD:?set in .env}
+      SPRING_MAIL_HOST: ${SPRING_MAIL_HOST:-mailpit}
+      SPRING_MAIL_PORT: ${SPRING_MAIL_PORT:-1025}
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      discovery-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  catalog-service:
+    build:
+      context: ./backend
+      dockerfile: catalog-service/Dockerfile
+    image: foleybooks/catalog-service:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?set in .env}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?set in .env}
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
+      JWKS_URI: ${JWKS_URI:-http://auth-service:8081/oauth2/jwks}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://catalog-db:5432/${CATALOG_DB_NAME:?set in .env}
+      SPRING_DATASOURCE_USERNAME: ${CATALOG_DB_USER:?set in .env}
+      SPRING_DATASOURCE_PASSWORD: ${CATALOG_DB_PASSWORD:?set in .env}
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      discovery-service:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  order-service:
+    build:
+      context: ./backend
+      dockerfile: order-service/Dockerfile
+    image: foleybooks/order-service:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      EUREKA_USERNAME: ${EUREKA_USERNAME:?set in .env}
+      EUREKA_PASSWORD: ${EUREKA_PASSWORD:?set in .env}
+      EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
+      JWKS_URI: ${JWKS_URI:-http://auth-service:8081/oauth2/jwks}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://order-db:5432/${ORDER_DB_NAME:?set in .env}
+      SPRING_DATASOURCE_USERNAME: ${ORDER_DB_USER:?set in .env}
+      SPRING_DATASOURCE_PASSWORD: ${ORDER_DB_PASSWORD:?set in .env}
+    depends_on:
+      order-db:
+        condition: service_healthy
+      discovery-service:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  auth-db-data:
+  catalog-db-data:
+  order-db-data:
