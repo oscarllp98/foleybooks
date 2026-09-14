@@ -2,7 +2,11 @@
 FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /workspace
 COPY pom.xml ./
+# Sibling POMs: the parent aggregator lists every module, so the reactor needs them
+# to resolve -pl discovery-service -am; their sources are not copied or built.
 COPY discovery-service/pom.xml ./discovery-service/
+COPY api-gateway/pom.xml ./api-gateway/
+COPY auth-service/pom.xml ./auth-service/
 RUN mvn -B -pl discovery-service -am dependency:go-offline
 COPY discovery-service/src ./discovery-service/src
 RUN mvn -B -pl discovery-service -am package -DskipTests \

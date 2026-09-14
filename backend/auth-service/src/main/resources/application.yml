@@ -1,0 +1,70 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: auth-service
+  profiles:
+    # Local runs default to dev; containers set SPRING_PROFILES_ACTIVE=docker.
+    default: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  mail:
+    host: ${SPRING_MAIL_HOST:localhost}
+    port: ${SPRING_MAIL_PORT:1025}
+
+eureka:
+  client:
+    service-url:
+      # Registry credentials embedded per ADR-006; no committed defaults.
+      defaultZone: http://${EUREKA_USERNAME}:${EUREKA_PASSWORD}@${EUREKA_HOSTNAME:localhost}:8761/eureka/
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+
+# Swagger UI is a dev-profile-only surface (AGENTS.md §6).
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    # Host-run dev: expects the database env trio from .env (C19 — no committed password).
+    url: jdbc:postgresql://localhost:5432/${AUTH_DB_NAME:auth_db}
+    username: ${AUTH_DB_USER:auth_user}
+    password: ${AUTH_DB_PASSWORD}
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  datasource:
+    # docker-compose overrides the full SPRING_DATASOURCE_* trio; these are the
+    # compose-network fallbacks (auth-db answers on :5432 inside the network, C27).
+    # No committed password (C19): startup fails fast when the env is missing.
+    url: jdbc:postgresql://auth-db:5432/${AUTH_DB_NAME:auth_db}
+    username: ${AUTH_DB_USER:auth_user}
+    password: ${AUTH_DB_PASSWORD}
