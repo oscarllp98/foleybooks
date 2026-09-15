@@ -21,6 +21,11 @@ eureka:
       # Registry credentials embedded per ADR-006; no committed defaults.
       defaultZone: http://${EUREKA_USERNAME}:${EUREKA_PASSWORD}@${EUREKA_HOSTNAME:localhost}:8761/eureka/
 
+logging:
+  pattern:
+    # MDC traceId set by TraceIdFilter — the same id every ProblemDetail carries (NFR-06, D-15).
+    level: "%5p [${spring.application.name:},%X{traceId:-}]"
+
 management:
   endpoints:
     web:
