@@ -23,6 +23,12 @@ app:
   mail:
     transport: smtp
     from: ${SPRING_MAIL_FROM:noreply@foleybooks.com}
+    # AU-09 (ADR-001/D-02): total delivery attempts per message (initial +
+    # scheduled retries) and the fixed backoff between them. Exhaustion logs
+    # an error; the request flow is never affected and FR-02 resend recovers.
+    retry:
+      max-attempts: 3
+      delay: 1s
 
 eureka:
   client:

@@ -3,9 +3,10 @@ package com.foleybooks.auth.mail;
 /**
  * App-owned mail port (ADR-001): the two emails the MVP sends — the FR-01
  * confirmation link and the FR-01/LC-01 "already registered" notice. Callers
- * never wait on SMTP: implementations are synchronous primitives that AU-09
- * wraps in async dispatch with retry, so registration can never block or fail
- * on delivery (LC-18). No Spring mail type crosses this seam (C7).
+ * never wait on SMTP: the transport adapters are synchronous primitives, and
+ * the AU-09 {@link AsyncRetryingMailSender} decorator wraps them in async
+ * dispatch with scheduled retry, so registration can never block or fail on
+ * delivery (LC-18). No Spring mail type crosses this seam (C7).
  *
  * <p>Note: deliberately NOT {@code org.springframework.mail.MailSender} —
  * the Spring type is confined to {@link SmtpMailSender}.

@@ -39,19 +39,23 @@ auth-service, and hide every Spring mail type behind an app-owned port in the
 
 ```
 com.foleybooks.auth.mail
-├── MailSender           # app-owned port (note: our type, not Spring's same-named interface)
-├── SmtpMailSender       # adapter — the only non-config code referencing mail types
-└── LoggingMailSender    # test adapter — records intent, delivers nothing
+├── MailSender               # app-owned port (note: our type, not Spring's same-named interface)
+├── SmtpMailSender           # adapter — the only non-config code referencing Spring mail types
+├── LoggingMailSender        # test adapter — records intent, delivers nothing
+└── AsyncRetryingMailSender  # AU-09 decorator — async dispatch + 3-attempt scheduled retry
 ```
 
 - The port exposes the two use cases (confirmation link, already-registered notice)
   as non-blocking sends; the caller never waits on SMTP.
 - **One SMTP adapter serves both Mailpit and any real provider** — Mailpit speaks
   plain SMTP, so "Mailpit" is a configuration target, not a distinct implementation.
-- Dispatch is asynchronous with a scheduled retry of **3 attempts** (AU-09); when
-  all attempts fail the event is logged at error level (recipient-free message
-  wording where feasible, never the token value — C24) and the request flow is
-  unaffected: FR-02's resend is the user-visible recovery path.
+- Dispatch is asynchronous with a scheduled retry of **3 attempts per message
+  in total** (AU-09; `app.mail.retry.max-attempts` — the initial dispatch plus
+  2 scheduled retries at the default, resolving the "3 attempts"/"3 retries"
+  phrasing in favor of the former); when all attempts fail the event is logged
+  at error level (recipient-free message wording where feasible, never the
+  token value — C24) and the request flow is unaffected: FR-02's resend is the
+  user-visible recovery path.
 
 ### Wiring per environment
 
@@ -78,8 +82,11 @@ The confirmation link itself is built per D-01 from `FRONTEND_BASE_URL`
 
 ## Consequences
 
-- AU-08 implements the three types above; AU-09 adds `@Async` dispatch and the
-  3-attempt scheduled retry; the register/confirm/resend services (AU-11..AU-14)
+- AU-08 implements the three types above; AU-09 adds the `AsyncRetryingMailSender`
+  decorator (async dispatch + the 3-attempt scheduled retry) wired in `MailConfig`
+  over the transport-selected adapter, on an explicit `Executor` + `TaskScheduler`
+  from `config/AsyncConfig` — not `@Async`, whose proxy would never see the
+  decorator's self-invocations; the register/confirm/resend services (AU-11..AU-14)
   depend on `MailSender` only and stay unit-testable without Spring mail.
 - Host-run `dev` cannot deliver mail against the compose Mailpit (its `:1025` is not
   published, C27) — delivery failures retry, then log, while registration still
@@ -105,11 +112,18 @@ constitution's precedence order (C6 — no silent reinterpretation):
 - **AGENTS.md §2, Mail row** — "dev profile → Mailpit container" remains literally
   true (the `dev` profile points at Mailpit's SMTP), but C27's port-publish policy
   makes that target unreachable from a **host-run** process: `mvnw spring-boot:run`
-  + compose means mail fails after its 3 retries (harmless per LC-18). This ADR
+  + compose means mail fails after its 3 attempts (harmless per LC-18). This ADR
   resolves the tension by scoping reliable delivery to the compose stack (the
   demo/WR-02 path) rather than relaxing C27 to publish `:1025`. No edit to
   AGENTS.md is proposed; if a future change wants host-run dev mail, it must
   explicitly amend C27, not quietly expose the port.
+- **AGENTS.md §4, "Stateless services"** — "No `HttpSession`, no in-memory state"
+  is read per that sentence's own scope ("all session state lives in JWTs / the
+  DB"): the AU-09 in-process dispatch queue and pending retries hold
+  not-yet-delivered messages for seconds, never session or user state, and are
+  the direct consequence of this ADR's rejected-outbox decision above. A crash
+  inside the retry window can lose at most one in-flight confirmation —
+  recovered by FR-02 resend per LC-18. No edit to AGENTS.md is proposed.
 
 ## References
 
@@ -119,4 +133,6 @@ constitution's precedence order (C6 — no silent reinterpretation):
 - AGENTS.md §2 (Mail row: starter-mail behind port, Mailpit dev), §5 (C24 logging)
 - `docs/constitution.md`: C1, C2, C7, C19, C24, C27
 - `docker-compose.yml` (mailpit service, C27 port policy), `.env.example` (§SMTP),
-  `backend/auth-service/pom.xml` + `application.yml` (`spring.mail.*`)
+  `backend/auth-service/pom.xml` + `application.yml` (`spring.mail.*`,
+  `app.mail.retry.*`), `backend/auth-service` `config/AsyncConfig` +
+  `config/MailConfig` (decorator wiring)
