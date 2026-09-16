@@ -15,6 +15,15 @@ spring:
     host: ${SPRING_MAIL_HOST:localhost}
     port: ${SPRING_MAIL_PORT:1025}
 
+# Mail transport seam (ADR-001): smtp = Mailpit/real provider via spring.mail.*;
+# log = record intent only, set by context-booting integration tests.
+# app.mail.from is deliberately NOT spring.mail.from: Boot's MailProperties has
+# no from field — the adapter stamps it on every message itself.
+app:
+  mail:
+    transport: smtp
+    from: ${SPRING_MAIL_FROM:noreply@foleybooks.com}
+
 eureka:
   client:
     service-url:

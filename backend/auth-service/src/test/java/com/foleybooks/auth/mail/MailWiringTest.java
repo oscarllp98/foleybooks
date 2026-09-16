@@ -1,9 +1,7 @@
-package com.foleybooks.auth;
+package com.foleybooks.auth.mail;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.foleybooks.auth.mail.MailSender;
-import com.foleybooks.auth.mail.SmtpMailSender;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -12,14 +10,19 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+/**
+ * Proof that the ADR-001 transport knob wires the recording adapter into a
+ * full context — the setup AU-19/AU-20 integration tests will reuse.
+ */
 @Testcontainers
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
         "EUREKA_USERNAME=test-user",
         "EUREKA_PASSWORD=test-secret",
-        "AUTH_DB_PASSWORD=test-db-secret"
+        "AUTH_DB_PASSWORD=test-db-secret",
+        "app.mail.transport=log"
 })
-class AuthServiceApplicationTests {
+class MailWiringTest {
 
     @Container
     @ServiceConnection
@@ -29,12 +32,7 @@ class AuthServiceApplicationTests {
     MailSender mailSender;
 
     @Test
-    void startup_whenPostgresAvailable_bootsSuccessfully() {
-    }
-
-    @Test
-    void mailSender_whenTransportDefaultsToSmtp_wiresSmtpAdapter() {
-        // ADR-001: real deploys (dev/docker) send SMTP toward the configured host.
-        assertThat(mailSender).isInstanceOf(SmtpMailSender.class);
+    void mailSender_whenTransportLog_wiresRecordingAdapter() {
+        assertThat(mailSender).isInstanceOf(LoggingMailSender.class);
     }
 }
