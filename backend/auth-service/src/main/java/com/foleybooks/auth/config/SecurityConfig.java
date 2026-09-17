@@ -9,6 +9,8 @@ import org.springframework.security.config.annotation.web.configuration.EnableWe
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
@@ -87,5 +89,16 @@ public class SecurityConfig {
     @Bean
     UserDetailsService authHasNoHttpUsers() {
         return new InMemoryUserDetailsManager();
+    }
+
+    /**
+     * The one password codec (AGENTS.md §5, NFR-01): BCrypt strength 12 — the cost the
+     * AU-05 demo seed hashes were minted at, used to encode at registration (FR-01) and
+     * to verify at login (FR-03, AU-17). Placed here so the whole service shares a single
+     * encoder bean instead of each feature constructing its own.
+     */
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder(12);
     }
 }

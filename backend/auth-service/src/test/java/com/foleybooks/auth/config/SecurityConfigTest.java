@@ -24,9 +24,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Deny-by-default proof (NFR-01, AU-04): the real SecurityConfig runs in-slice,
  * security is never disabled (C25), and every rejection is a ProblemDetail (NFR-06).
  * Runs on the docker profile — the application's default profile is dev (which opens
- * the springdoc surface), so "non-dev" has to be pinned explicitly.
+ * the springdoc surface), so "non-dev" has to be pinned explicitly. The slice is
+ * pinned to the probe controllers so the authorization evidence stays stable as real
+ * auth controllers arrive (a real register handler would answer 400 to the probe's
+ * bodiless POST and collide with the probe mapping); the real controllers' public
+ * reachability is proven in their own @WebMvcTest slices. The probe sits outside
+ * the scanned package, so it needs both the {@code controllers} filter and the
+ * explicit {@code @Import} — the filter alone would leave every probe path 404.
  */
-@WebMvcTest
+@WebMvcTest(controllers = SecurityProbeController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class, SecurityProbeController.class})
 @ActiveProfiles("docker")
 class SecurityConfigTest {

@@ -15,8 +15,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * The springdoc surface is dev-only (AGENTS.md §6): the dev profile activates
  * {@code springdoc.api-docs.enabled=true}, and only then SecurityConfig permits it.
+ * Slice pinned to the probe controllers so this proof stays stable as real auth
+ * controllers join the classpath (same reason as in {@code SecurityConfigTest}).
  */
-@WebMvcTest
+@WebMvcTest(controllers = SecurityProbeController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class, SecurityProbeController.class})
 @ActiveProfiles("dev")
 class SecurityConfigDevProfileTest {

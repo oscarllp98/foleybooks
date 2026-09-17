@@ -29,6 +29,10 @@ app:
     retry:
       max-attempts: 3
       delay: 1s
+  # D-01: confirmation emails link to <base>/verify-email?token=… — the same
+  # FRONTEND_BASE_URL the gateway uses for CORS (.env.example "Frontend").
+  frontend:
+    base-url: ${FRONTEND_BASE_URL:http://localhost:5173}
 
 eureka:
   client:
