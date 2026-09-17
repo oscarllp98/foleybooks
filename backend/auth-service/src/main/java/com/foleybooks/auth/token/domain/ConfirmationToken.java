@@ -91,4 +91,19 @@ public class ConfirmationToken {
     public Instant getUpdatedAt() {
         return updatedAt;
     }
+
+    /**
+     * Replaces the active link in place: the previous raw token stops
+     * resolving because its hash is gone. Only ever called through
+     * {@code ConfirmationTokenService}, which mints the hash.
+     */
+    public void rotateTo(String newTokenHash, Instant newExpiresAt) {
+        this.tokenHash = newTokenHash;
+        this.expiresAt = newExpiresAt;
+    }
+
+    /** Stamps the resend throttle; stays null until the first resend. */
+    public void markResentAt(Instant resentAt) {
+        this.lastResendAt = resentAt;
+    }
 }

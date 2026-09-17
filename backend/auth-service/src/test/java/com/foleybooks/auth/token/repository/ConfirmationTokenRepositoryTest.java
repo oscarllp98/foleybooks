@@ -86,4 +86,20 @@ class ConfirmationTokenRepositoryTest {
     void findByTokenHash_whenUnknownHash_returnsEmpty() {
         assertThat(confirmationTokenRepository.findByTokenHash("e".repeat(64))).isEmpty();
     }
+
+    @Test
+    void findByUserId_whenUserOwnsRow_returnsThatToken() {
+        // The issue/rotate upsert and the throttle read resolve the
+        // account's single active row by user id.
+        Instant expiresAt = Instant.now().plus(24, ChronoUnit.HOURS);
+        confirmationTokenRepository.saveAndFlush(new ConfirmationToken(user, TOKEN_HASH, expiresAt));
+
+        ConfirmationToken found = confirmationTokenRepository.findByUserId(user.getId()).orElseThrow();
+        assertThat(found.getTokenHash()).isEqualTo(TOKEN_HASH);
+    }
+
+    @Test
+    void findByUserId_whenNoActiveToken_returnsEmpty() {
+        assertThat(confirmationTokenRepository.findByUserId(user.getId())).isEmpty();
+    }
 }
