@@ -1,6 +1,7 @@
 package com.foleybooks.auth.user.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -13,31 +14,39 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.foleybooks.auth.config.FrontendProperties;
 import com.foleybooks.auth.mail.MailSender;
+import com.foleybooks.auth.token.domain.ConfirmationToken;
 import com.foleybooks.auth.token.service.ConfirmationTokenService;
+import com.foleybooks.auth.user.api.ConfirmRequest;
+import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
 import com.foleybooks.auth.user.domain.User;
 import com.foleybooks.auth.user.domain.UserRole;
 import com.foleybooks.auth.user.domain.UserStatus;
 import com.foleybooks.auth.user.repository.UserRepository;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * Plain JUnit + Mockito unit tests for FR-01 registration (plan §6.1). The
- * password codec is the real {@code BCryptPasswordEncoder(12)} so the
- * "BCrypt strength 12" claim is proven, not mocked; the transaction template
- * runs its callback inline (the boundary itself is Spring's job), while
- * repositories and the mail port are mocks — persistence is covered by
- * {@code UserRepositoryTest} and non-blocking delivery by
- * {@code AsyncRetryingMailSenderTest} (AU-09).
+ * Plain JUnit + Mockito unit tests for FR-01 registration and FR-02
+ * confirmation (plan §6.1). The password codec is the real
+ * {@code BCryptPasswordEncoder(12)} so the "BCrypt strength 12" claim is
+ * proven, not mocked; the transaction template runs its callback inline (the
+ * boundary itself is Spring's job), while repositories and the mail port are
+ * mocks — persistence is covered by {@code UserRepositoryTest} and
+ * non-blocking delivery by {@code AsyncRetryingMailSenderTest} (AU-09).
  */
 class UserServiceImplTest {
 
@@ -45,6 +54,8 @@ class UserServiceImplTest {
     private static final String EMAIL = "reader@example.com";
     private static final String RAW_TOKEN = "cafebabe".repeat(8);
     private static final String CONFIRMATION_LINK = BASE_URL + "/verify-email?token=" + RAW_TOKEN;
+    private static final UUID USER_ID = UUID.fromString("0b8f4b2e-9d3a-4c1e-8a2b-1f2e3d4c5b6a");
+    private static final String STORED_TOKEN_HASH = "0123456789abcdef".repeat(4);
 
     private final UserRepository userRepository = mock(UserRepository.class);
     private final ConfirmationTokenService confirmationTokenService = mock(ConfirmationTokenService.class);
@@ -256,7 +267,104 @@ class UserServiceImplTest {
                 .isEqualTo(objectMapper.writeValueAsString(fresh));
     }
 
+    // ---------------------------------------------------------------- AU-13: confirm (FR-02)
+
+    @Test
+    void confirm_whenAccountUnverifiedAndLinkLive_verifiesAtomicallyAndReportsConfirmed() {
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        stubStoredToken(unverified, Instant.now().plus(23, ChronoUnit.HOURS));
+        when(userRepository.verifyIfUnverified(eq(USER_ID), any(Instant.class))).thenReturn(1);
+        Instant before = Instant.now();
+
+        ConfirmResponse response = service.confirm(new ConfirmRequest(RAW_TOKEN));
+
+        assertThat(response).isEqualTo(ConfirmResponse.confirmed());
+        ArgumentCaptor<Instant> verifiedAt = ArgumentCaptor.forClass(Instant.class);
+        verify(userRepository).verifyIfUnverified(eq(USER_ID), verifiedAt.capture());
+        // The audit stamp rides the same atomic statement (ADR-002: @Modifying
+        // paths never fire @UpdateTimestamp) and is "now", not the token's age.
+        assertThat(verifiedAt.getValue()).isBetween(before.minusSeconds(5), Instant.now().plusSeconds(5));
+        verifyNoInteractions(mailSender);
+    }
+
+    @Test
+    void confirm_expired_returnsExpiredWithResendHint() {
+        // LC-02 (plan §6.1): the row is stored but past its 24-hour window —
+        // 410, the resend hint, and no status write.
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        stubStoredToken(unverified, Instant.now().minus(1, ChronoUnit.MINUTES));
+
+        assertThatThrownBy(() -> service.confirm(new ConfirmRequest(RAW_TOKEN)))
+                .isInstanceOfSatisfying(ConfirmationTokenException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.GONE);
+                    assertThat(ex.getType()).isEqualTo("urn:foley-books:problem:expired-confirmation-token");
+                    assertThat(ex.getProperties()).containsEntry("resendHint",
+                            "Request a new link with POST /api/v1/auth/resend.");
+                    assertThat(ex.getMessage()).doesNotContain(RAW_TOKEN);
+                });
+
+        verify(userRepository, never()).verifyIfUnverified(any(), any());
+        verifyNoInteractions(mailSender);
+    }
+
+    @Test
+    void confirm_verifiedUser_idempotent() {
+        // LC-03/LC-23 (plan §6.1): the row survives verification (ADR-002), so
+        // re-opening a spent link — here even one long expired — answers the
+        // idempotent success without a second write. The status check runs
+        // before the expiry check precisely for this case.
+        User verified = storedAccount(UserStatus.VERIFIED);
+        stubStoredToken(verified, Instant.now().minus(48, ChronoUnit.HOURS));
+
+        ConfirmResponse response = service.confirm(new ConfirmRequest(RAW_TOKEN));
+
+        assertThat(response).isEqualTo(ConfirmResponse.alreadyConfirmed());
+        verify(userRepository, never()).verifyIfUnverified(any(), any());
+        verifyNoInteractions(mailSender);
+    }
+
+    @Test
+    void confirm_whenTokenResolvesToNoRow_throwsInvalidOrExpiredWithResendHint() {
+        // A never-issued or superseded (rotated-away) link is indistinguishable
+        // from an expired one: 410 invalid-or-expired, still with the hint.
+        when(confirmationTokenService.find(RAW_TOKEN)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.confirm(new ConfirmRequest(RAW_TOKEN)))
+                .isInstanceOfSatisfying(ConfirmationTokenException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.GONE);
+                    assertThat(ex.getType()).isEqualTo("urn:foley-books:problem:invalid-or-expired-confirmation-token");
+                    assertThat(ex.getProperties()).containsKey("resendHint");
+                });
+
+        verifyNoInteractions(userRepository);
+    }
+
+    @Test
+    void confirm_whenAtomicUpdateMatchesNoRow_reportsAlreadyConfirmed() {
+        // LC-23: between the read and the UPDATE a concurrent request won the
+        // row; verifyIfUnverified affects 0 rows and this call degrades to the
+        // same idempotent success instead of double-verifying or erroring.
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        stubStoredToken(unverified, Instant.now().plus(23, ChronoUnit.HOURS));
+        when(userRepository.verifyIfUnverified(eq(USER_ID), any(Instant.class))).thenReturn(0);
+
+        ConfirmResponse response = service.confirm(new ConfirmRequest(RAW_TOKEN));
+
+        assertThat(response).isEqualTo(ConfirmResponse.alreadyConfirmed());
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private void stubStoredToken(User owner, Instant expiresAt) {
+        when(confirmationTokenService.find(RAW_TOKEN))
+                .thenReturn(Optional.of(new ConfirmationToken(owner, STORED_TOKEN_HASH, expiresAt)));
+    }
+
+    private static User storedAccount(UserStatus status) {
+        User user = storedUser(status);
+        ReflectionTestUtils.setField(user, "id", USER_ID);
+        return user;
+    }
 
     private void stubUnknownEmail() {
         when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.empty());

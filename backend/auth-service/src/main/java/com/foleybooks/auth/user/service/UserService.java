@@ -1,5 +1,8 @@
 package com.foleybooks.auth.user.service;
 
+import com.foleybooks.auth.token.service.ConfirmationTokenService;
+import com.foleybooks.auth.user.api.ConfirmRequest;
+import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
 
@@ -21,4 +24,17 @@ public interface UserService {
      * with the identical enumeration-safe {@link RegisterResponse} (LC-01).
      */
     RegisterResponse register(RegisterRequest request);
+
+    /**
+     * Confirms an email address (FR-02): the raw link token resolves to its
+     * stored row through {@link ConfirmationTokenService}, an already-VERIFIED
+     * account answers the idempotent success even when the link has since
+     * expired (LC-03, LC-23), an unknown or superseded token and a live but
+     * past-24-hour one answer 410 with a resend hint (LC-02), and only a live
+     * link on an UNVERIFIED account flips the status — through the single
+     * atomic UPDATE so simultaneous double-use verifies exactly once and the
+     * loser still sees success (LC-23). The spent row survives (ADR-002); the
+     * raw token is never logged (C24).
+     */
+    ConfirmResponse confirm(ConfirmRequest request);
 }

@@ -6,11 +6,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.foleybooks.auth.user.domain.User;
 import com.foleybooks.auth.user.domain.UserRole;
 import com.foleybooks.auth.user.domain.UserStatus;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.TestPropertySource;
@@ -38,6 +42,9 @@ class UserRepositoryTest {
 
     @Autowired
     UserRepository userRepository;
+
+    @Autowired
+    TestEntityManager entityManager;
 
     @Test
     void seedDemoUsers_whenMigrationsApplied_hashesMatchDocumentedDemoPasswords() {
@@ -85,5 +92,42 @@ class UserRepositoryTest {
     @Test
     void findByEmail_whenNoAccountMatches_returnsEmpty() {
         assertThat(userRepository.findByEmail("ghost@foleybooks.com")).isEmpty();
+    }
+
+    @Test
+    void verifyIfUnverified_whenAccountUnverified_flipsStatusAndStampsUpdatedAt() {
+        // AU-13 / ADR-002: FR-02's verification is one guarded bulk UPDATE, and
+        // bulk SQL bypasses @UpdateTimestamp — the statement must carry the
+        // audit stamp itself (AGENTS.md §7).
+        User unverified = userRepository.saveAndFlush(new User(
+                "confirm-me@foleybooks.com", BCRYPT_12_DUMMY, UserRole.CUSTOMER, UserStatus.UNVERIFIED));
+        Instant verifiedAt = Instant.now().truncatedTo(ChronoUnit.MICROS).plusSeconds(1);
+
+        assertThat(userRepository.verifyIfUnverified(unverified.getId(), verifiedAt)).isEqualTo(1);
+
+        entityManager.flush();
+        entityManager.clear();
+        User stored = userRepository.findById(unverified.getId()).orElseThrow();
+        assertThat(stored.getStatus()).isEqualTo(UserStatus.VERIFIED);
+        assertThat(stored.getUpdatedAt()).isEqualTo(verifiedAt);
+    }
+
+    @Test
+    void verifyIfUnverified_whenAccountAlreadyVerified_matchesNoRowAndLeavesAuditUntouched() {
+        // LC-23 at the database: the second confirmation's UPDATE predicate
+        // finds no UNVERIFIED row, affects nothing, and must not rewrite the
+        // audit trail — the service turns this zero into the idempotent 200.
+        User verified = userRepository.saveAndFlush(new User(
+                "already-confirmed@foleybooks.com", BCRYPT_12_DUMMY, UserRole.CUSTOMER, UserStatus.VERIFIED));
+        Instant originalUpdatedAt = verified.getUpdatedAt();
+
+        assertThat(userRepository.verifyIfUnverified(
+                verified.getId(), originalUpdatedAt.plus(1, ChronoUnit.HOURS))).isZero();
+
+        entityManager.flush();
+        entityManager.clear();
+        User stored = userRepository.findById(verified.getId()).orElseThrow();
+        assertThat(stored.getStatus()).isEqualTo(UserStatus.VERIFIED);
+        assertThat(Duration.between(originalUpdatedAt, stored.getUpdatedAt()).abs().toMillis()).isZero();
     }
 }

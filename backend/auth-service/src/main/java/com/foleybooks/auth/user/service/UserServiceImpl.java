@@ -2,28 +2,33 @@ package com.foleybooks.auth.user.service;
 
 import com.foleybooks.auth.config.FrontendProperties;
 import com.foleybooks.auth.mail.MailSender;
+import com.foleybooks.auth.token.domain.ConfirmationToken;
 import com.foleybooks.auth.token.service.ConfirmationTokenService;
+import com.foleybooks.auth.user.api.ConfirmRequest;
+import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
 import com.foleybooks.auth.user.domain.User;
 import com.foleybooks.auth.user.domain.UserRole;
 import com.foleybooks.auth.user.domain.UserStatus;
 import com.foleybooks.auth.user.repository.UserRepository;
+import java.time.Instant;
 import java.util.Locale;
 import java.util.Optional;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * FR-01 registration with every duplicate branch (AU-11/AU-12). The email is
- * normalized before anything else touches it — trim + lowercase under
- * {@link Locale#ROOT} (LC-15, LC-24, LC-26; the boundary deserializer already
- * hands over the canonical value and {@code ck_users_email_lower} is the
- * at-rest backstop), while the password is encoded verbatim with the
- * BCrypt-12 {@link PasswordEncoder} and new accounts start {@code UNVERIFIED}
- * with the {@code CUSTOMER} role.
+ * FR-01 registration with every duplicate branch (AU-11/AU-12) and FR-02 email
+ * confirmation (AU-13). The email is normalized before anything else touches it
+ * — trim + lowercase under {@link Locale#ROOT} (LC-15, LC-24, LC-26; the
+ * boundary deserializer already hands over the canonical value and
+ * {@code ck_users_email_lower} is the at-rest backstop), while the password is
+ * encoded verbatim with the BCrypt-12 {@link PasswordEncoder} and new accounts
+ * start {@code UNVERIFIED} with the {@code CUSTOMER} role.
  *
  * <p>The three branches (plan §4) all end in the identical 201 envelope
  * ({@link RegisterResponse#unverified}), so a caller can never tell which one
@@ -43,7 +48,11 @@ import org.springframework.transaction.support.TransactionOperations;
  * aborted it. Confirmation mail only leaves once that unit has committed
  * (FR-01/LC-18: a rolled-back account must never orphan a live link), and
  * dispatch is async on top, so no delivery outcome can influence the response
- * (C24). Token re-issuance is transactional in its own service.
+ * (C24). Token re-issuance is transactional in its own service. FR-02
+ * confirmation has no such race to recover from, so it takes the ordinary
+ * request-scoped {@code @Transactional} boundary instead: one read/write
+ * transaction covering the token lookup, the status/expiry checks and the
+ * atomic verification UPDATE.
  */
 @Service
 public class UserServiceImpl implements UserService {
@@ -96,6 +105,40 @@ public class UserServiceImpl implements UserService {
         dispatchDuplicateBranch(existing.orElseThrow(() -> new IllegalStateException(
                 "Email vanished between the pre-check and the post-race re-read.")));
         return RegisterResponse.unverified(email);
+    }
+
+    /**
+     * FR-02 confirmation (AU-13). Runs in one plain read/write transaction —
+     * unlike registration there is no constraint race to catch, and the lazy
+     * {@code token.getUser()} read plus the guarded bulk UPDATE must share one
+     * persistence context. The checks follow the plan §4 order deliberately:
+     * the VERIFIED status is tested <em>before</em> the expiry window so
+     * re-opening a long-dead link on a confirmed account answers the idempotent
+     * success of LC-03, not a confusing 410. Verification itself is the single
+     * atomic {@code UPDATE … WHERE status = 'UNVERIFIED'} (LC-23): concurrent
+     * double-use lets exactly one caller flip the row, and the loser — whose
+     * statement matches zero rows once the winner commits — still answers
+     * success. The confirmation row is never deleted (ADR-002): retaining it is
+     * what keeps a spent link resolvable.
+     */
+    @Override
+    @Transactional
+    public ConfirmResponse confirm(ConfirmRequest request) {
+        Instant now = Instant.now();
+        ConfirmationToken token = confirmationTokenService.find(request.token())
+                .orElseThrow(ConfirmationTokenException::invalidOrExpired);
+
+        User user = token.getUser();
+        if (user.getStatus() == UserStatus.VERIFIED) {
+            return ConfirmResponse.alreadyConfirmed();
+        }
+        if (token.getExpiresAt().isBefore(now)) {
+            throw ConfirmationTokenException.expired();
+        }
+
+        return userRepository.verifyIfUnverified(user.getId(), now) == 1
+                ? ConfirmResponse.confirmed()
+                : ConfirmResponse.alreadyConfirmed();
     }
 
     /** Atomically persists the account + first confirmation link; returns the raw token for post-commit dispatch. */

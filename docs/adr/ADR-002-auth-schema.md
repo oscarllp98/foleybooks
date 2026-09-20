@@ -124,14 +124,16 @@ CREATE TABLE confirmation_tokens (
   row's `token_hash`/`expires_at`, which invalidates every link issued earlier.
 - `last_resend_at` is `NULL` until the first resend and is the single source of truth for
   the 60 s throttle (D-04); duplicate registration re-confirmation reads the same column.
-- The row **survives verification**. Plan §3 proposed deleting it, but that cannot satisfy
+- The row **survives verification**. The plan §3 sketch originally proposed deleting it,
+  but that cannot satisfy
   FR-02/LC-03: once the hash lookup returns nothing, the service has no way to tell an
   already-confirmed re-open from an unknown token, and the idempotent "already confirmed"
   response degrades to 410. Retaining the row keeps the spent link resolvable, and
   `users.status` is what discriminates the two cases.
 - Verification is a single atomic statement on the parent row, relying on the Postgres
   row lock for LC-23:
-  `UPDATE users SET status='VERIFIED', updated_at=now() WHERE id = ? AND status='UNVERIFIED'`.
+  `UPDATE users SET status='VERIFIED', updated_at=now() WHERE id = ? AND status='UNVERIFIED'`
+  (the service binds the timestamp explicitly — same value it used for the expiry check).
   The second concurrent request observes 0 updated rows and the `VERIFIED` status, and
   returns 200 "already confirmed" rather than re-verifying. No trigger, no extra column,
   no second write.
@@ -202,8 +204,9 @@ an explicit human-approved sync rather than a silent reinterpretation (C6).
 - **Plan §3, confirmation-token bullet** — the parenthetical "deletion on verification
   makes reuse detectable via the user status" is unachievable, as the row is precisely
   what links a spent token back to a user. This ADR retains the row. **The plan is
-  product truth above ADRs, so it needs the same edit** (strike the deletion clause);
-  pending user approval, since plan.md is not part of AU-01's deliverable.
+  product truth above ADRs, so it carries the same edit**: plan.md §3 and the §4
+  `confirm` pseudocode were synced in the AU-13 follow-up (user-approved) — the
+  deletion clause is gone and §2/§6 now document the retained-row contract.
 
 ## References
 
