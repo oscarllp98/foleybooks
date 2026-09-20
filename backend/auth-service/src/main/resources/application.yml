@@ -33,6 +33,14 @@ app:
   # FRONTEND_BASE_URL the gateway uses for CORS (.env.example "Frontend").
   frontend:
     base-url: ${FRONTEND_BASE_URL:http://localhost:5173}
+  # D-03 (AGENTS.md §5): RS256 access tokens. Blank PEM ⇒ dev auto-generates an
+  # ephemeral pair at startup (C19 — no committed keys); real deployments supply
+  # JWT_PRIVATE_KEY/JWT_PUBLIC_KEY (.env.example "JWT").
+  jwt:
+    issuer: ${JWT_ISSUER:http://localhost:8081}
+    access-token-ttl: 15m
+    private-key-pem: ${JWT_PRIVATE_KEY:}
+    public-key-pem: ${JWT_PUBLIC_KEY:}
 
 eureka:
   client:
@@ -92,3 +100,9 @@ spring:
     url: jdbc:postgresql://auth-db:5432/${AUTH_DB_NAME:auth_db}
     username: ${AUTH_DB_USER:auth_user}
     password: ${AUTH_DB_PASSWORD}
+
+app:
+  jwt:
+    # Inside the compose network auth-service answers as auth-service:8081 (C27);
+    # docker-compose also forwards a JWT_ISSUER override (.env.example "JWT").
+    issuer: ${JWT_ISSUER:http://auth-service:8081}

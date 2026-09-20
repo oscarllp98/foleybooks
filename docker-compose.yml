@@ -135,6 +135,8 @@ services:
       EUREKA_PASSWORD: ${EUREKA_PASSWORD:?set in .env}
       EUREKA_HOSTNAME: ${EUREKA_HOSTNAME:-discovery-service}
       FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:5173}
+      # iss claim of issued access tokens (.env.example "JWT"):
+      JWT_ISSUER: ${JWT_ISSUER:-http://auth-service:8081}
       # Production only — dev auto-generates the RSA keypair at startup (AGENTS.md §5):
       # JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
       # JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY}
