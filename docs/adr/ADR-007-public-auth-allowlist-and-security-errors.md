@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted — amended for AU-17 (login, 2026-09-21): the body-credential pattern is
+extended to login's credential check and login's timing-parity decision is recorded.
 
 ## Context
 
@@ -45,6 +46,23 @@ Reviewing the task against the governing documents surfaced three conflicts:
   GETs, `health`/`info` — clarifying that "public" means *no valid access token
   required*, because refresh and logout authenticate with their own opaque
   refresh token in the body.
+- **Login joins the body-credential trio (AU-17).** `POST /api/v1/auth/login`
+  authenticates at the service layer too: `TokenServiceImpl.login` matches the
+  email/password pair from the request body against the BCrypt-12 hash and the
+  `UNVERIFIED` status gate. That is how C26 is satisfied for auth-service
+  specifically — the service issues tokens and, per AGENTS.md §2, has no
+  validating resource-server decoder, so Spring Security cannot decide its
+  credentials the way it does for protected resources elsewhere. The filter
+  chain still owns the allowlist and every denial it renders; the three auth
+  commands authenticate with exactly the credential the body carries
+  (email/password, refresh token — FR-03..FR-05, D-05).
+- **Login timing parity (AU-17).** The unknown-email branch of login verifies
+  the presented password against a lazily minted throwaway BCrypt hash, so
+  response time cannot distinguish "no such account" from "wrong password" —
+  FR-03's "never reveal … whether the account exists" is read to cover the
+  timing channel, as FR-02's resend already covers timing-of-write (NFR-01;
+  the throwaway hash and every credential stay out of logs and responses,
+  C24). Approved by the user when AU-17 was reviewed.
 - **auth-service SecurityConfig**: `permitAll` on exactly those paths (under the
   `/api/v1` prefix the gateway forwards without stripping, plus `/oauth2/jwks`
   and the actuator health/info), `/actuator/metrics/**` guarded by
@@ -77,6 +95,13 @@ Reviewing the task against the governing documents surfaced three conflicts:
 - The constitutional text now matches the spec's product truth; C22's deny-by-
   default posture is preserved because the amendment only clarifies the
   explicit allowlist, never a wildcard.
+- Login can never be turned into an account-enumeration oracle by response
+  *content* (unknown email and wrong password render the identical 401 Problem
+  Detail, LC-06) nor by response *time* (both pay one BCrypt verification) — the
+  same guarantee AU-20's `EnumerationSafetyIT` checks for register and resend.
+- The 403 for an UNVERIFIED account is the one intentional distinction on the
+  login path, and it is gated behind a verified password, so only the real
+  owner can ever see it (LC-05).
 - `GET /actuator/metrics` on auth-service returns 401/403 for every caller;
   when auth-service eventually self-validates tokens, the matcher starts
   working without a config change.
