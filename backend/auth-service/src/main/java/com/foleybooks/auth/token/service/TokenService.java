@@ -4,12 +4,12 @@ import com.foleybooks.auth.token.api.LoginRequest;
 import com.foleybooks.auth.token.api.TokenPair;
 
 /**
- * Session lifecycle behind {@code /api/v1/auth} (FR-03, FR-04): login opens a
- * session, refresh rotates one. Refresh tokens are opaque 256-bit values whose
- * SHA-256 digest is the only thing that reaches the database (ADR-002); each
- * use is single — the spent row flips to ROTATED and stays so reuse remains
- * the theft signal — and the replacement session gets a fresh sliding 7-day
- * window. Logout's row delete lives with AU-18.
+ * Session lifecycle behind {@code /api/v1/auth} (FR-03..FR-05): login opens a
+ * session, refresh rotates one, logout ends one. Refresh tokens are opaque
+ * 256-bit values whose SHA-256 digest is the only thing that reaches the
+ * database (ADR-002); each use is single — the spent row flips to ROTATED and
+ * stays so reuse remains the theft signal — and the replacement session gets
+ * a fresh sliding 7-day window.
  */
 public interface TokenService {
 
@@ -40,4 +40,18 @@ public interface TokenService {
      * @throws RefreshTokenException when the value resolves to nothing usable
      */
     TokenPair refresh(String refreshToken);
+
+    /**
+     * Ends the session the presented refresh token belongs to (FR-05, AU-18):
+     * the ACTIVE row whose SHA-256 digest matches the value is deleted — the
+     * current session only, so other devices keep their rows and their
+     * refreshes keep working (LC-21). There is no other observable outcome:
+     * an unknown, already logged-out, spent or revoked value deletes nothing,
+     * and both branches are the same idempotent success (LC-09) with no
+     * token-dependent response, log line or failure mode (C24, NFR-01). The
+     * {@code ROTATED}/{@code REVOKED} rows stay exactly where they are — they
+     * are the reuse evidence LC-08 needs (ADR-002), and logout must never be
+     * a way to erase it.
+     */
+    void logout(String refreshToken);
 }

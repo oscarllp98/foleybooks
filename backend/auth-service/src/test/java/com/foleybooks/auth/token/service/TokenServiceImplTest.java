@@ -1,6 +1,7 @@
 package com.foleybooks.auth.token.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
@@ -9,6 +10,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import ch.qos.logback.classic.Level;
@@ -358,6 +360,38 @@ class TokenServiceImplTest {
                 .isEqualTo(401);
 
         verify(repository, never()).saveAndFlush(any());
+    }
+
+    // ---------------------------------------------------------------- AU-18: logout (FR-05)
+
+    @Test
+    void logout_unknownToken_succeeds() {
+        // Plan §6.1 oracle (FR-05, LC-09, LC-21): nothing to delete — unknown,
+        // already logged out, spent or revoked — is the same silent success,
+        // reached through the hash lookup the row was stored under.
+        when(repository.deleteActiveByTokenHash(STORED_TOKEN_HASH)).thenReturn(0);
+
+        assertThatCode(() -> service.logout(RAW_TOKEN)).doesNotThrowAnyException();
+
+        verify(repository).deleteActiveByTokenHash(STORED_TOKEN_HASH);
+    }
+
+    @Test
+    void logout_activeSession_deletesExactlyThePresentedRowByHashAndNothingElse() {
+        // The raw value never leaves the service layer unhashed (C24), and
+        // logout is one row delete — never a rotation, revocation sweep or
+        // new session (FR-05: other devices keep their rows, LC-21; spent
+        // ROTATED evidence stays, ADR-002).
+        when(repository.deleteActiveByTokenHash(STORED_TOKEN_HASH)).thenReturn(1);
+
+        service.logout(RAW_TOKEN);
+
+        verify(repository).deleteActiveByTokenHash(STORED_TOKEN_HASH);
+        verify(repository, never()).findByTokenHash(any());
+        verify(repository, never()).markRotatedIfActive(any(), any());
+        verify(repository, never()).revokeAllActiveForUser(any(), any());
+        verify(repository, never()).saveAndFlush(any());
+        verifyNoInteractions(userRepository);
     }
 
     /** Stands up the shared user with a real BCrypt-12 hash of {@code password} and returns it. */

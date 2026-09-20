@@ -92,8 +92,13 @@ CREATE INDEX ix_refresh_tokens_user ON refresh_tokens (user_id);
 - Rows are **never deleted on rotation**: the predecessor flips to `ROTATED` and stays, so
   presenting a spent token is detectable and triggers `revokeAllForUser` (LC-08). A
   delete-on-rotate design would silently turn theft into a plain 401.
-- **Logout deletes the current session's row** (D-05, AU-18, `deleteByHash`); it does not
-  flip a status. Other sessions keep their own rows and are unaffected (FR-05, LC-09).
+- **Logout deletes the current session's row** (D-05, AU-18, `deleteActiveByTokenHash`); it
+  does not flip a status. The delete is guarded on `status = ACTIVE`: spent `ROTATED` and
+  theft-`REVOKED` rows are never removed, so logging out with an old value cannot erase the
+  reuse evidence the clause above protects — an unguarded delete would let a stale-token
+  logout silently downgrade LC-08 detection to a plain 401. Matching zero rows (unknown,
+  already logged out, spent) is the idempotent success (FR-05, LC-09). Other sessions keep
+  their own rows and are unaffected (LC-21).
   `REVOKED` is therefore written only by the bulk reuse-detection update
   (`UPDATE … SET status='REVOKED', updated_at=now() WHERE user_id = ? AND
   status='ACTIVE'`); a logged-out token simply misses the lookup.
@@ -145,10 +150,12 @@ CREATE TABLE confirmation_tokens (
   (AGENTS.md §7). Both have DB defaults so seed SQL is valid; the JPA entities maintain
   them for application writes via `@CreationTimestamp` / `@UpdateTimestamp`. This
   supersedes the plan §3 sketch, which listed audit columns only on `users`.
-- **Audit fields on bulk paths too**: `@UpdateTimestamp` only fires for entity saves, so
-  every `@Modifying` statement in this schema (the atomic verification update and the
-  revoke-all update) sets `updated_at = now()` explicitly — otherwise AGENTS.md §7 is
-  silently violated whenever a token or status changes through bulk SQL (AU-13, AU-16).
+- **Audit fields on bulk UPDATE paths too**: `@UpdateTimestamp` only fires for entity saves, so
+  every bulk `UPDATE` in this schema (the atomic verification update, the single-use rotation
+  guard and the revoke-all update) sets `updated_at = now()` explicitly — otherwise AGENTS.md
+  §7 is silently violated whenever a token or status changes through bulk SQL (AU-13, AU-16).
+  Logout's bulk `DELETE` (AU-18) is exempt: it removes the row outright, leaving no
+  `updated_at` to stamp.
 - **Timestamps are `TIMESTAMPTZ`**, mapped to `Instant`, and compared in UTC — no
   server-timezone ambiguity in TTL math (FR-02, FR-04).
 - **Primary keys are `UUID DEFAULT gen_random_uuid()`** (public identifiers are UUIDs,
@@ -191,7 +198,7 @@ CREATE TABLE confirmation_tokens (
 
 ## Deviations
 
-Recorded here because both touch documents that rank **above** this ADR in the
+Recorded here because they touch documents that rank **above** this ADR in the
 constitution's precedence order (constitution > specs > AGENTS.md > ADRs), so each needs
 an explicit human-approved sync rather than a silent reinterpretation (C6).
 
@@ -207,6 +214,13 @@ an explicit human-approved sync rather than a silent reinterpretation (C6).
   product truth above ADRs, so it carries the same edit**: plan.md §3 and the §4
   `confirm` pseudocode were synced in the AU-13 follow-up (user-approved) — the
   deletion clause is gone and §2/§6 now document the retained-row contract.
+- **Plan §4, `logout` pseudocode** — the sketch said `deleteByHash(sha256(refreshToken))`,
+  an unguarded delete that would let a logout presenting a spent value destroy the
+  `ROTATED` reuse evidence FR-04/LC-08 depend on (the same self-sabotage the
+  delete-on-rotate paragraph above rules out). AU-18 implements the row delete guarded on
+  `status = ACTIVE`. **The plan is product truth above ADRs, so it carries the sync**:
+  plan.md §4 now reads `deleteActiveByHash` with the guard and its rationale spelled out
+  (user-approved in the AU-18 review).
 
 ## References
 

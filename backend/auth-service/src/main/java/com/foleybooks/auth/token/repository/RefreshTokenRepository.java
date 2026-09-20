@@ -21,6 +21,25 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, UUID
     Optional<RefreshToken> findByTokenHash(String tokenHash);
 
     /**
+     * The explicit-logout row delete (FR-05, D-05, AU-18): only the
+     * {@code ACTIVE} session the presented value belongs to disappears — the
+     * current session only, other devices keep their rows (LC-21), and every
+     * later refresh with the value misses the lookup. The status guard is
+     * load-bearing: spent {@code ROTATED} and theft-{@code REVOKED} rows are
+     * precisely the reuse-detection evidence LC-08 depends on (ADR-002), so
+     * logging out with an old value must not be able to erase it — matching
+     * zero rows is idempotent success (LC-09), which the service renders as
+     * the same 204 either way.
+     */
+    @Modifying
+    @Query("""
+            DELETE FROM RefreshToken t
+             WHERE t.tokenHash = :tokenHash
+               AND t.status = com.foleybooks.auth.token.domain.RefreshTokenStatus.ACTIVE
+            """)
+    int deleteActiveByTokenHash(@Param("tokenHash") String tokenHash);
+
+    /**
      * The single-use rotation write (FR-04, LC-22): one UPDATE that only flips
      * an {@code ACTIVE} row, so of two concurrent refreshes with the same
      * token exactly one wins and the loser matches zero rows — the same

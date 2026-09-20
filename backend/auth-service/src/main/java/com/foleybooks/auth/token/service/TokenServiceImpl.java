@@ -20,8 +20,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * Login's session start (FR-03, AU-17) plus single-use rotation with theft
- * detection for refresh sessions (FR-04, AU-16, plan §4, ADR-002). The whole
+ * Login's session start (FR-03, AU-17), single-use rotation with theft
+ * detection for refresh sessions (FR-04, AU-16, plan §4, ADR-002) and
+ * logout's row delete (FR-05, AU-18). The whole
  * refresh exchange runs as one guarded unit: the
  * predecessor row only flips ACTIVE → ROTATED through
  * {@code markRotatedIfActive}, so concurrent refreshes of the same value race
@@ -115,6 +116,24 @@ public class TokenServiceImpl implements TokenService {
             throw RefreshTokenException.invalidOrExpired();
         }
         return rotated;
+    }
+
+    /**
+     * Explicit logout (FR-05, AU-18): one guarded delete keyed on the
+     * SHA-256 digest of the presented value, matching only the {@code ACTIVE}
+     * row — the current session dies, other devices keep theirs (LC-21), and
+     * spent or revoked theft-evidence rows stay (ADR-002, see
+     * {@code RefreshTokenRepository#deleteActiveByTokenHash}). The affected-row
+     * count is deliberately unread: unknown and already-gone values must be
+     * indistinguishable idempotent successes (LC-09), so there is exactly one
+     * branch, no message, and nothing to log (C24). Runs in its own
+     * transaction like login — the statement itself is atomic, and a DELETE
+     * has no audit-stamp obligation (ADR-002).
+     */
+    @Override
+    @Transactional
+    public void logout(String refreshToken) {
+        refreshTokenRepository.deleteActiveByTokenHash(OpaqueTokens.sha256Hex(refreshToken));
     }
 
     /**
