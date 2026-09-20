@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.foleybooks.auth.common.ProblemDetailResponder;
 import com.foleybooks.auth.config.SecurityConfig;
 import com.foleybooks.auth.user.service.UserService;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -85,17 +86,46 @@ class RegisterControllerTest {
     void register_whenPasswordExceeds72Bytes_returns400WithByteCapacityError() throws Exception {
         // BCrypt hashes at most 72 bytes; the codec would throw past them
         // (latent 500). @MaxUtf8Bytes turns it into the contracted 400 (C23).
+        // Letter and digit present so only the byte capacity fires.
         mockMvc.perform(post("/api/v1/auth/register")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"email": "reader@example.com", "password": "%s"}
-                                """.formatted("Aa" + "x".repeat(80))))
+                                """.formatted("Aa1" + "x".repeat(80))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
                 .andExpect(jsonPath("$.errors[0].field").value("password"))
                 .andExpect(jsonPath("$.errors[0].message").value("must be at most 72 bytes"));
 
         verifyNoInteractions(userService);
+    }
+
+    @Test
+    void register_whenBranchesYieldTheSameEnvelope_respondsWithByteIdenticalBodies() throws Exception {
+        // FR-01/LC-01 wire contract (plan §6.2): every branch answers 201 with
+        // the same envelope. The stub derives it exactly as the service does —
+        // from the (boundary-normalized) email — so a padding-and-casing
+        // variant of the same address must produce a byte-identical body.
+        when(userService.register(any())).thenAnswer(invocation ->
+                RegisterResponse.unverified(((RegisterRequest) invocation.getArgument(0)).email()));
+
+        String canonical = mockMvc.perform(post("/api/v1/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "reader@example.com", "password": "Bookworm7"}
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        String paddedVariant = mockMvc.perform(post("/api/v1/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email": "  Reader@Example.com  ", "password": "Bookworm7"}
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(paddedVariant).isEqualTo(canonical);
     }
 
     @Test
