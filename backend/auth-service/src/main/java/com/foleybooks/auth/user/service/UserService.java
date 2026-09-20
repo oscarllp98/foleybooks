@@ -5,6 +5,8 @@ import com.foleybooks.auth.user.api.ConfirmRequest;
 import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
+import com.foleybooks.auth.user.api.ResendRequest;
+import com.foleybooks.auth.user.api.ResendResponse;
 
 /**
  * Account lifecycle behind {@code /api/v1/auth} (FR-01..FR-03): the business
@@ -37,4 +39,17 @@ public interface UserService {
      * raw token is never logged (C24).
      */
     ConfirmResponse confirm(ConfirmRequest request);
+
+    /**
+     * Resends the confirmation email (FR-02, AU-14): the normalized address
+     * is looked up and, only when it belongs to an UNVERIFIED account
+     * outside the 60-second D-04 throttle window, its active link is rotated
+     * (invalidating every previously issued one) and the fresh confirmation
+     * mail dispatched asynchronously. Unknown, already-VERIFIED and
+     * throttled accounts all quietly skip the write — and every branch
+     * answers the identical {@link ResendResponse} 202 so the endpoint can
+     * never be used to enumerate accounts (LC-04, LC-20, NFR-01). The raw
+     * token never reaches the response or the logs (C24).
+     */
+    ResendResponse resend(ResendRequest request);
 }

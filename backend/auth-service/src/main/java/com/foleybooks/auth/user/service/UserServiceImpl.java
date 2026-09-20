@@ -8,6 +8,8 @@ import com.foleybooks.auth.user.api.ConfirmRequest;
 import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
+import com.foleybooks.auth.user.api.ResendRequest;
+import com.foleybooks.auth.user.api.ResendResponse;
 import com.foleybooks.auth.user.domain.User;
 import com.foleybooks.auth.user.domain.UserRole;
 import com.foleybooks.auth.user.domain.UserStatus;
@@ -22,8 +24,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * FR-01 registration with every duplicate branch (AU-11/AU-12) and FR-02 email
- * confirmation (AU-13). The email is normalized before anything else touches it
+ * FR-01 registration with every duplicate branch (AU-11/AU-12), FR-02 email
+ * confirmation (AU-13) and FR-02 confirmation resend (AU-14). The email is normalized before anything else touches it
  * — trim + lowercase under {@link Locale#ROOT} (LC-15, LC-24, LC-26; the
  * boundary deserializer already hands over the canonical value and
  * {@code ck_users_email_lower} is the at-rest backstop), while the password is
@@ -139,6 +141,38 @@ public class UserServiceImpl implements UserService {
         return userRepository.verifyIfUnverified(user.getId(), now) == 1
                 ? ConfirmResponse.confirmed()
                 : ConfirmResponse.alreadyConfirmed();
+    }
+
+    /**
+     * FR-02 resend (AU-14). A plain read + conditional re-issue — like the
+     * duplicate registration branch, mail leaves asynchronously and token
+     * rotation is transactional in {@link ConfirmationTokenService}, so no
+     * request-scoped transaction is needed here. The three silent branches
+     * (unknown address, already-VERIFIED account, inside the 60-second D-04
+     * throttle) and the one live branch all fall through to the same
+     * {@link ResendResponse#generic()} 202, so an attacker cannot tell them
+     * apart by response, status or timing-of-write (LC-04, LC-20, NFR-01).
+     * A throttled request deliberately does not "inform the user to wait"
+     * with a distinct answer — that would be exactly the enumeration oracle
+     * FR-02 forbids; the wait guidance rides the constant message body
+     * instead. The raw token only ever enters the email, never the response
+     * or a log (C24).
+     */
+    @Override
+    public ResendResponse resend(ResendRequest request) {
+        String email = normalizeEmail(request.email());
+
+        Optional<User> existing = userRepository.findByEmail(email);
+        if (existing.isPresent() && existing.get().getStatus() == UserStatus.UNVERIFIED) {
+            User pending = existing.get();
+            if (!confirmationTokenService.isResendThrottled(pending)) {
+                // Only an UNVERIFIED account outside the throttle window gets a
+                // fresh link; rotation invalidates every previously issued one.
+                String rawToken = confirmationTokenService.rotate(pending);
+                mailSender.sendConfirmation(email, confirmationLink(rawToken));
+            }
+        }
+        return ResendResponse.generic();
     }
 
     /** Atomically persists the account + first confirmation link; returns the raw token for post-commit dispatch. */

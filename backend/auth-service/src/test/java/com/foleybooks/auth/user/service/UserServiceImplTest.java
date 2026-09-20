@@ -20,6 +20,8 @@ import com.foleybooks.auth.user.api.ConfirmRequest;
 import com.foleybooks.auth.user.api.ConfirmResponse;
 import com.foleybooks.auth.user.api.RegisterRequest;
 import com.foleybooks.auth.user.api.RegisterResponse;
+import com.foleybooks.auth.user.api.ResendRequest;
+import com.foleybooks.auth.user.api.ResendResponse;
 import com.foleybooks.auth.user.domain.User;
 import com.foleybooks.auth.user.domain.UserRole;
 import com.foleybooks.auth.user.domain.UserStatus;
@@ -40,8 +42,8 @@ import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * Plain JUnit + Mockito unit tests for FR-01 registration and FR-02
- * confirmation (plan §6.1). The password codec is the real
+ * Plain JUnit + Mockito unit tests for FR-01 registration, FR-02 confirmation
+ * and FR-02 resend (plan §6.1). The password codec is the real
  * {@code BCryptPasswordEncoder(12)} so the "BCrypt strength 12" claim is
  * proven, not mocked; the transaction template runs its callback inline (the
  * boundary itself is Spring's job), while repositories and the mail port are
@@ -353,7 +355,124 @@ class UserServiceImplTest {
         assertThat(response).isEqualTo(ConfirmResponse.alreadyConfirmed());
     }
 
+    // ---------------------------------------------------------------- AU-14: resend (FR-02)
+
+    @Test
+    void resend_whenAccountUnverified_rotatesLinkAndSendsConfirmation() {
+        // FR-02 happy path: a pending account outside the throttle window gets
+        // a fresh link that invalidates every earlier one.
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(unverified));
+        when(confirmationTokenService.isResendThrottled(unverified)).thenReturn(false);
+        when(confirmationTokenService.rotate(unverified)).thenReturn(RAW_TOKEN);
+
+        ResendResponse response = service.resend(new ResendRequest(EMAIL));
+
+        verify(confirmationTokenService).rotate(unverified);
+        verify(mailSender).sendConfirmation(EMAIL, CONFIRMATION_LINK);
+        assertThat(response).isEqualTo(ResendResponse.generic());
+    }
+
+    @Test
+    void resend_withinThrottle_rejected() {
+        // LC-04 / D-04: inside the 60-second window nothing is rotated or sent;
+        // the previously issued link simply stays valid — and the response is
+        // still the same 202 (a distinct "wait" reply would be an oracle).
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(unverified));
+        when(confirmationTokenService.isResendThrottled(unverified)).thenReturn(true);
+
+        ResendResponse response = service.resend(new ResendRequest(EMAIL));
+
+        verify(confirmationTokenService, never()).rotate(any());
+        verifyNoInteractions(mailSender);
+        assertThat(response).isEqualTo(ResendResponse.generic());
+    }
+
+    @Test
+    void resend_unknownEmail_sendsNothingAndReturnsGeneric() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.empty());
+
+        ResendResponse response = service.resend(new ResendRequest(EMAIL));
+
+        verifyNoInteractions(confirmationTokenService);
+        verifyNoInteractions(mailSender);
+        assertThat(response).isEqualTo(ResendResponse.generic());
+    }
+
+    @Test
+    void resend_verifiedEmail_sendsNothingAndReturnsGeneric() {
+        // A VERIFIED account has no confirmation to resend; the branch must be
+        // behaviorally silent so it is indistinguishable from the unknown one.
+        User verified = storedAccount(UserStatus.VERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(verified));
+
+        ResendResponse response = service.resend(new ResendRequest(EMAIL));
+
+        verifyNoInteractions(mailSender);
+        verify(confirmationTokenService, never()).rotate(any());
+        verify(confirmationTokenService, never()).isResendThrottled(any());
+        assertThat(response).isEqualTo(ResendResponse.generic());
+    }
+
+    @Test
+    void resend_unknownOrVerifiedEmail_identicalResponse() throws Exception {
+        // LC-20 / NFR-01 (plan §6.1): the two silent branches serialize to the
+        // exact same body an attacker sees for a real unverified address — no
+        // field, status or byte reveals whether the account exists or its state.
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.empty());
+        ResendResponse unknown = service.resend(new ResendRequest(EMAIL));
+
+        User verified = storedAccount(UserStatus.VERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(verified));
+        ResendResponse verifiedResponse = service.resend(new ResendRequest(EMAIL));
+
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(unverified));
+        when(confirmationTokenService.isResendThrottled(unverified)).thenReturn(true);
+        ResendResponse throttled = service.resend(new ResendRequest(EMAIL));
+
+        assertThat(verifiedResponse).isEqualTo(unknown);
+        assertThat(throttled).isEqualTo(unknown);
+        assertThat(objectMapper.writeValueAsString(throttled))
+                .isEqualTo(objectMapper.writeValueAsString(verifiedResponse))
+                .isEqualTo(objectMapper.writeValueAsString(unknown));
+    }
+
+    @Test
+    void resend_mixedCaseAndWhitespaceEmail_normalizesBeforeLookup() {
+        // LC-15, LC-26: the resend lookup uses the same canonical address as
+        // registration stored, so casing/padding cannot miss the account.
+        User unverified = storedAccount(UserStatus.UNVERIFIED);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(userOpt(unverified));
+        when(confirmationTokenService.isResendThrottled(unverified)).thenReturn(true);
+
+        ResendResponse response = service.resend(new ResendRequest("  READER@Example.COM  "));
+
+        verify(userRepository).findByEmail(EMAIL);
+        assertThat(response).isEqualTo(ResendResponse.generic());
+    }
+
+    @Test
+    void resend_neverEchoesTokenOrLeaksAccountState() throws Exception {
+        // NFR-01, C24: the response body is a fixed message — it carries no
+        // token, no email, and nothing that differs across branches.
+        ObjectMapper objectMapper = new ObjectMapper();
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.empty());
+
+        String body = objectMapper.writeValueAsString(service.resend(new ResendRequest(EMAIL)));
+
+        assertThat(body).doesNotContain(RAW_TOKEN).doesNotContain(EMAIL);
+        assertThat(ResendResponse.generic().message()).contains("try again in a minute");
+    }
+
     // ---------------------------------------------------------------- helpers
+
+    private Optional<User> userOpt(User user) {
+        return Optional.of(user);
+    }
 
     private void stubStoredToken(User owner, Instant expiresAt) {
         when(confirmationTokenService.find(RAW_TOKEN))

@@ -47,7 +47,7 @@ flowchart TB
     subgraph net["Docker compose network"]
         gw[api-gateway :8080<br/>Spring Cloud Gateway<br/>routing, CORS, JWT relay]
         eureka[discovery-service :8761<br/>Eureka registry — HTTP Basic, ADR-006]
-        auth[auth-service :8081<br/>register / confirm / login / refresh / logout<br/>RS256 JWT issuer + JWKS]
+        auth[auth-service :8081<br/>register / confirm / resend / login / refresh / logout<br/>RS256 JWT issuer + JWKS]
         catalog[catalog-service :8082<br/>books + categories read model<br/>search, availability]
         order[order-service :8083<br/>per-user persistent cart]
         authdb[(auth_db<br/>PostgreSQL 16)]
