@@ -7,6 +7,7 @@ COPY pom.xml ./
 COPY discovery-service/pom.xml ./discovery-service/
 COPY api-gateway/pom.xml ./api-gateway/
 COPY auth-service/pom.xml ./auth-service/
+COPY catalog-service/pom.xml ./catalog-service/
 RUN mvn -B -pl auth-service -am dependency:go-offline
 COPY auth-service/src ./auth-service/src
 RUN mvn -B -pl auth-service -am package -DskipTests \

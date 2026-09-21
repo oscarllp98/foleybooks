@@ -95,7 +95,8 @@ flowchart TB
 - **Stateless services**: session state lives in JWTs / the DB — no `HttpSession`.
 - **Security**: JWT RS256 issued by auth-service; every other service validates via
   `spring.security.oauth2.resourceserver.jwt` against the JWKS URI
-  (`JWKS_URI` env). CORS only at the gateway. Deny-by-default elsewhere (C22, D-14).
+  (`JWKS_URI` env), with the `roles` claim mapped to `ROLE_`-prefixed authorities
+  (ADR-008). CORS only at the gateway. Deny-by-default elsewhere (C22, D-14).
 - **Gateway-only east-west policy**: the frontend never talks to a domain service
   directly; inter-service calls (order → catalog) bypass the gateway via Eureka.
 
@@ -162,7 +163,8 @@ sequenceDiagram
 
 - [`docs/adr/`](adr/) — decision records (mail sending: ADR-001; auth schema:
   ADR-002; catalog schema: ADR-003; Eureka security: ADR-006; public auth
-  allowlist + security errors: ADR-007; more land with each spec phase)
+  allowlist + security errors: ADR-007; resource-server JWT validation +
+  roles mapping: ADR-008; more land with each spec phase)
 - Module structure, endpoint map and technical decisions (D-01..D-15) are defined in
   the Spec 001 plan; product requirements live in the spec — both are maintained
   outside the public repository.
