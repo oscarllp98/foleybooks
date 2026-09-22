@@ -17,6 +17,9 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -123,6 +126,27 @@ class BookRepositoryTest {
         assertThat(cleanCode.getAuthor()).isEqualTo("Robert C. Martin");
         assertThat(cleanCode.getPrice()).isEqualByComparingTo("31.99");
         assertThat(cleanCode.getStockQuantity()).isGreaterThan(5);
+    }
+
+    @Test
+    void findAll_whenPagedWithDefaultTitleSort_windowsSeedCatalogStably() {
+        // CA-06's default sort is {@code Sort.by(ASC, "title")} on the entity
+        // property — Spring Data raises PropertyReferenceException for a name
+        // that does not resolve, so this call proves FR-06's sort path exists
+        // on the real mapping, and the windowing proves the Page metadata the
+        // envelope publishes is the repository's own.
+        Sort titleAsc = Sort.by(Sort.Direction.ASC, "title");
+
+        Page<Book> firstWindow = bookRepository.findAll(PageRequest.of(0, 5, titleAsc));
+        List<String> fullOrder = bookRepository.findAll(PageRequest.of(0, 12, titleAsc))
+                .getContent().stream().map(Book::getTitle).toList();
+
+        assertThat(firstWindow.getContent()).extracting(Book::getTitle)
+                .containsExactlyElementsOf(fullOrder.subList(0, 5));
+        assertThat(firstWindow.getTotalElements()).isEqualTo(12);
+        assertThat(firstWindow.getTotalPages()).isEqualTo(3);
+        assertThat(firstWindow.getNumber()).isZero();
+        assertThat(firstWindow.getSize()).isEqualTo(5);
     }
 
     @Test

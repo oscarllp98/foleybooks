@@ -4,6 +4,7 @@ import com.foleybooks.catalog.book.api.BookResponse;
 import com.foleybooks.catalog.book.domain.Book;
 import com.foleybooks.catalog.book.service.AvailabilityPolicy;
 import com.foleybooks.catalog.category.mapping.CategoryMapper;
+import java.util.List;
 import org.mapstruct.InjectionStrategy;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
@@ -37,4 +38,14 @@ public interface BookMapper {
 
     @Mapping(target = "availability", source = "stockQuantity", qualifiedByName = "availabilityOfStock")
     BookResponse toResponse(Book book);
+
+    /**
+     * The list/page projection consumed by the read paths (ADR-009: "list/page
+     * mapping is added by the task that consumes it" — CA-06 here, CA-10/CA-11
+     * later). MapStruct generates it as a loop over {@link #toResponse(Book)},
+     * so a collection can never drift from the single-entity contract: one
+     * owner per shape, at every cardinality. A {@code null} list maps to
+     * {@code null}; Spring Data hands out empty lists, never nulls.
+     */
+    List<BookResponse> toResponseList(List<Book> books);
 }

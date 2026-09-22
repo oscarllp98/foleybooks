@@ -10,6 +10,7 @@ import com.foleybooks.catalog.category.api.CategoryResponse;
 import com.foleybooks.catalog.category.domain.Category;
 import com.foleybooks.catalog.category.mapping.CategoryMapperImpl;
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -99,5 +100,19 @@ class BookMapperTest {
 
         assertThat(response.category()).isEqualTo(new CategoryResponse(TECHNOLOGY_ID, "Technology"));
         assertThat(response.availability()).isEqualTo(Availability.LOW_STOCK);
+    }
+
+    @Test
+    void toResponseList_whenBooksMapped_projectsEachElementThroughToResponse() {
+        // ADR-009: list/page mapping is added by the consuming task (CA-06) and
+        // delegates element by element — the collection can never drift from
+        // the single-entity contract, and the badge stays per-row derived.
+        List<BookResponse> mapped = mapper.toResponseList(List.of(cleanCode(12), cleanCode(0)));
+
+        assertThat(mapped).hasSize(2);
+        assertThat(mapped).extracting(BookResponse::id).containsOnly(CLEAN_CODE_ID);
+        assertThat(mapped).extracting(BookResponse::availability)
+                .containsExactly(Availability.IN_STOCK, Availability.OUT_OF_STOCK);
+        assertThat(mapper.toResponseList(List.of())).isEmpty();
     }
 }
