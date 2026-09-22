@@ -7,6 +7,11 @@ gate for CA-03 (Flyway V1 + entities/repositories) and CA-04 (Flyway V2 seed).
 No deviation from higher-ranked documents: the plan sketch stays intact and this
 ADR only fills in the details it left open (nullability, PKs, lengths, indexes).
 
+Schema note, refined by ADR-009 (not a schema change): this ADR says availability
+is *never persisted* and stays true; ADR-009 fixes where the derived value is
+computed (`AvailabilityPolicy` in the service layer) and the resulting
+`BookResponse` field list, including the published `stockQuantity`.
+
 ## Context
 
 catalog-service owns `catalog_db` exclusively (C18: no other service may reference
@@ -199,4 +204,6 @@ CREATE INDEX ix_books_category ON books (category_id);
 - `docs/constitution.md`: C1, C15, C16, C17, C18, C23
 - AGENTS.md §6 (UUID identifiers), §7 (persistence + seed rules)
 - ADR-002 (design language: constraints, audit columns, UUID PKs, fixed-UUID
-  seeds); ADR-005 (cart enrichment via `GET /books/batch` reads this schema)
+  seeds); ADR-005 (cart enrichment via `GET /books/batch` reads this schema);
+  ADR-009 (where the derived badge is computed, and the resulting
+  `BookResponse` field list)
