@@ -2,6 +2,7 @@ package com.foleybooks.catalog.category.mapping;
 
 import com.foleybooks.catalog.category.api.CategoryResponse;
 import com.foleybooks.catalog.category.domain.Category;
+import java.util.List;
 import org.mapstruct.Mapper;
 import org.mapstruct.MappingConstants;
 import org.mapstruct.ReportingPolicy;
@@ -10,9 +11,8 @@ import org.mapstruct.ReportingPolicy;
  * {@link Category} → {@link CategoryResponse} (FR-09, AGENTS.md §3): id and
  * name, nothing else, and the single owner of that shape — {@link
  * com.foleybooks.catalog.book.mapping.BookMapper} reaches it through {@code
- * uses} instead of restating it (ADR-009). A list method is deliberately
- * absent: {@code GET /categories} (CA-10) maps a {@code Page}, and C1 says the
- * element mapper is the only half that is required today.
+ * uses} instead of restating it (ADR-009). The list overload below joins it
+ * with CA-10, the task that consumes it (ADR-009).
  *
  * <p>{@code unmappedTargetPolicy = ERROR} is what enforces "nothing else" —
  * {@code createdAt}/{@code updatedAt} can only reach a response if someone
@@ -24,4 +24,14 @@ import org.mapstruct.ReportingPolicy;
 public interface CategoryMapper {
 
     CategoryResponse toResponse(Category category);
+
+    /**
+     * The list/page projection consumed by {@code GET /categories} (CA-10).
+     * MapStruct generates it as a loop over {@link #toResponse(Category)}, so a
+     * page of categories can never drift from the {@code { id, name }} object
+     * {@code BookResponse.category} already embeds: one owner per shape, at
+     * every cardinality. A {@code null} list maps to {@code null}; Spring Data
+     * hands out empty lists, never nulls.
+     */
+    List<CategoryResponse> toResponseList(List<Category> categories);
 }

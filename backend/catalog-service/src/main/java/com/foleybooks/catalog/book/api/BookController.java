@@ -71,7 +71,8 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/api/v1/books")
-@Tag(name = "Catalog", description = "Browse, search and inspect the book catalog (FR-06..FR-08)")
+@Tag(name = "Catalog", description = "Browse, search and inspect the book catalog and its categories "
+        + "(FR-06..FR-09)")
 public class BookController {
 
     /**

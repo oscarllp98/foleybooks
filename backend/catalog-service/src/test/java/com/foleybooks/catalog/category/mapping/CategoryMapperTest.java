@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.foleybooks.catalog.category.api.CategoryResponse;
 import com.foleybooks.catalog.category.domain.Category;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -32,5 +33,25 @@ class CategoryMapperTest {
         CategoryResponse response = mapper.toResponse(fiction);
 
         assertThat(response).isEqualTo(new CategoryResponse(FICTION_ID, "Fiction"));
+    }
+
+    @Test
+    void toResponseList_whenSeedPageMapped_projectsEveryElementThroughToResponse() {
+        // CA-10 added the list overload (ADR-009: "list/page mapping is added
+        // by the task that consumes it"). It must be the loop over the single
+        // entity mapper it claims to be: same shape at list cardinality, order
+        // preserved, empty page stays empty, never an error (LC-31).
+        Category fiction = new Category("Fiction");
+        ReflectionTestUtils.setField(fiction, "id", FICTION_ID);
+        Category technology = new Category("Technology");
+        ReflectionTestUtils.setField(technology, "id",
+                UUID.fromString("00000000-0000-0000-0000-00000000ca02"));
+
+        List<CategoryResponse> responses = mapper.toResponseList(List.of(fiction, technology));
+
+        assertThat(responses).containsExactly(
+                new CategoryResponse(FICTION_ID, "Fiction"),
+                new CategoryResponse(UUID.fromString("00000000-0000-0000-0000-00000000ca02"), "Technology"));
+        assertThat(mapper.toResponseList(List.of())).isEmpty();
     }
 }

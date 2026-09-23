@@ -88,6 +88,33 @@ documents state as principles but not as mechanics:
 - Money stays an exact `BigDecimal` at scale 2, serialized as a JSON number
   (D-08, NFR-07); nothing beyond the components above crosses the boundary (C9).
 
+### Amendment (CA-10): the category listing's surface
+
+Delivered with `GET /categories`, on this ADR's authority over the catalog read
+model (not a schema, security or dependency change, so no new ADR is triggered):
+
+- **No `sort` parameter; the order is fixed name-ascending.** AGENTS.md §6's
+  pagination line shows `?page=0&size=20&sort=field,asc` as the convention, but
+  the sort whitelist (D-06: `title`/`price`) is a books rule — FR-09 asks for a
+  browsable list, FR-06's "sortable by title and price" does not extend to
+  categories, and inventing a category sort grammar would be speculative (C1).
+  The fixed `name` ascending order exists because an unordered paged read is
+  nondeterministic across windows; it is an implementation detail, not a new
+  contract — a later spec that needs client-side category ordering adds the
+  parameter and amends this section.
+- **LC-11/LC-28 paging rules are duplicated, not shared.** `CategoryService`
+  re-declares the default-20/max-100 constants rather than importing
+  `BookService`'s: a category → book reference would be a sideways feature
+  dependency (C7) between two features that merely happen to share AGENTS §6's
+  numbers today. The duplication is accepted deliberately; if the numbers ever
+  diverge or a third paged read arrives, the consolidation is a `common/`
+  constants holder added by that refactor, not by editing either service in
+  place.
+- **Empty state**: the empty `categories` table is the FR-09/LC-31 200-with-
+  `content: []` outcome of the shared `PageEnvelope`, with no endpoint-specific
+  code — consistent with ADR-003 ("the empty state is a read-side outcome,
+  never an error").
+
 ## Consequences
 
 - C8 holds literally: the only rule CA-05 introduced is in a service class, and
@@ -118,4 +145,6 @@ documents state as principles but not as mechanics:
   through `GET /books/batch`)
 - Code: `catalog/catalog/book/api/{Availability,BookResponse}.java`,
   `book/service/AvailabilityPolicy.java`, `book/mapping/BookMapper.java`,
-  `category/api/CategoryResponse.java`, `category/mapping/CategoryMapper.java`
+  `category/api/CategoryResponse.java`, `category/mapping/CategoryMapper.java`,
+  and (CA-10) `category/api/CategoryController.java`,
+  `category/service/CategoryService(-Impl).java`
