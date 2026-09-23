@@ -29,13 +29,15 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * FR-06's browse rule at the repository seam (plan §6.1, LC-11): the exact
- * {@link Pageable} the service asks for, the sort it carries, and the envelope
- * that comes back. The plan §6.1 entry {@code pagination_clampsRanges} is carried
- * by {@link #pagination_clampsRanges(int, int, int, int)} plus the two
+ * {@link Pageable} the service asks for, the sort it carries, the filter it
+ * composes, and the envelope that comes back. The plan §6.1 entry
+ * {@code pagination_clampsRanges} is carried by {@link
+ * #pagination_clampsRanges(int, int, int, int)} plus the two
  * page-clamp-behind-a-second-fetch tests below: LC-11's numeric clamps that only
  * change the request live in the parameterized rows, while "page past the last →
  * last page" is only decidable after the first fetch, so it owns its own
@@ -49,6 +51,15 @@ import org.springframework.test.util.ReflectionTestUtils;
  * resolver would happily serve an empty phantom window. The mapper is the real
  * CA-05 generated one, so the badge and category inside the envelope are derived
  * by the shipped wiring, not a mock's opinion (C8, ADR-009).
+ *
+ * <p>CA-08's {@code search}/{@code categoryId} filter (FR-08, FR-09, D-06) is a
+ * repository-layer rule ({@code BookSpecifications}, proven against real
+ * PostgreSQL in {@code BookRepositoryTest}), so this mock-based seam only proves
+ * the two service-level obligations: the values are handed to the repository in
+ * every fetch — the same filter object identity is reused across a
+ * past-the-end re-fetch, so a clamp can never silently drop the search or the
+ * category the client asked for — and an omitted filter is a well-formed
+ * "no criteria" call, never a skipped one.
  */
 class BookServiceImplTest {
 
@@ -73,13 +84,13 @@ class BookServiceImplTest {
     }
 
     private void stubSinglePage(List<Book> content, int number, int size, long total) {
-        when(repository.findAll(any(Pageable.class)))
+        when(repository.findAll(any(Specification.class), any(Pageable.class)))
                 .thenReturn(new PageImpl<>(content, PageRequest.of(number, size), total));
     }
 
     private Pageable capturedRequest() {
         ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
-        verify(repository).findAll(captor.capture());
+        verify(repository).findAll(any(Specification.class), captor.capture());
         return captor.getValue();
     }
 
@@ -90,7 +101,7 @@ class BookServiceImplTest {
         // pageSize > total), and the envelope must publish the repository's own numbers.
         stubSinglePage(List.of(cleanCode()), 0, 20, 25);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(0, 20, null);
+        PageEnvelope<BookResponse> envelope = service.listBooks(0, 20, null, null, null);
 
         Pageable request = capturedRequest();
         assertThat(request.getPageNumber()).isZero();
@@ -98,7 +109,7 @@ class BookServiceImplTest {
         Sort.Order titleOrder = request.getSort().getOrderFor("title");
         assertThat(titleOrder).isNotNull();
         assertThat(titleOrder.getDirection()).isEqualTo(Sort.Direction.ASC);
-        verify(repository, times(1)).findAll(any(Pageable.class));
+        verify(repository, times(1)).findAll(any(Specification.class), any(Pageable.class));
 
         // Plan §2 envelope: mapped content plus the page metadata of the window served.
         assertThat(envelope.content()).singleElement().satisfies(book -> {
@@ -119,7 +130,7 @@ class BookServiceImplTest {
         // Data Sort the query uses — price, descending, with no title order.
         stubSinglePage(List.of(cleanCode()), 0, 20, 25);
 
-        service.listBooks(0, 20, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC));
+        service.listBooks(0, 20, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC), null, null);
 
         Sort.Order priceOrder = capturedRequest().getSort().getOrderFor("price");
         assertThat(priceOrder).isNotNull();
@@ -131,7 +142,7 @@ class BookServiceImplTest {
     void listBooks_whenTitleAscendingRequested_sortsByTitleAscending() {
         stubSinglePage(List.of(cleanCode()), 0, 20, 25);
 
-        service.listBooks(0, 20, new BookSort(BookSort.Field.TITLE, BookSort.Direction.ASC));
+        service.listBooks(0, 20, new BookSort(BookSort.Field.TITLE, BookSort.Direction.ASC), null, null);
 
         Sort.Order titleOrder = capturedRequest().getSort().getOrderFor("title");
         assertThat(titleOrder).isNotNull();
@@ -156,7 +167,7 @@ class BookServiceImplTest {
         // past-the-last-page re-fetch; that rule owns its own tests below.
         stubSinglePage(List.of(cleanCode()), effectivePage, effectiveSize, 12_000);
 
-        service.listBooks(page, size, null);
+        service.listBooks(page, size, null, null, null);
 
         Pageable request = capturedRequest();
         assertThat(request.getPageNumber()).isEqualTo(effectivePage);
@@ -169,12 +180,12 @@ class BookServiceImplTest {
         // 12 books at size 2 end at page 5.
         PageImpl<Book> phantom = new PageImpl<>(List.of(), PageRequest.of(3, 2), 12);
         PageImpl<Book> lastPage = new PageImpl<>(List.of(cleanCode(), cleanCode()), PageRequest.of(5, 2), 12);
-        when(repository.findAll(any(Pageable.class))).thenReturn(phantom, lastPage);
+        when(repository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(phantom, lastPage);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(3, 2, null);
+        PageEnvelope<BookResponse> envelope = service.listBooks(3, 2, null, null, null);
 
         ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
-        verify(repository, times(2)).findAll(captor.capture());
+        verify(repository, times(2)).findAll(any(Specification.class), captor.capture());
         List<Pageable> requests = captor.getAllValues();
         assertThat(requests.get(0).getPageNumber()).isEqualTo(3);
         assertThat(requests.get(1).getPageNumber()).isEqualTo(5);
@@ -192,12 +203,12 @@ class BookServiceImplTest {
         // carry the client's chosen sort, not silently revert to the default.
         PageImpl<Book> phantom = new PageImpl<>(List.of(), PageRequest.of(3, 2), 12);
         PageImpl<Book> lastPage = new PageImpl<>(List.of(cleanCode()), PageRequest.of(5, 2), 12);
-        when(repository.findAll(any(Pageable.class))).thenReturn(phantom, lastPage);
+        when(repository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(phantom, lastPage);
 
-        service.listBooks(3, 2, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC));
+        service.listBooks(3, 2, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC), null, null);
 
         ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
-        verify(repository, times(2)).findAll(captor.capture());
+        verify(repository, times(2)).findAll(any(Specification.class), captor.capture());
         for (Pageable request : captor.getAllValues()) {
             Sort.Order priceOrder = request.getSort().getOrderFor("price");
             assertThat(priceOrder).isNotNull();
@@ -212,9 +223,9 @@ class BookServiceImplTest {
         // never a phantom page 3.
         PageImpl<Book> phantom = new PageImpl<>(List.of(), PageRequest.of(3, 20), 0);
         PageImpl<Book> firstPage = new PageImpl<>(List.of(), PageRequest.of(0, 20), 0);
-        when(repository.findAll(any(Pageable.class))).thenReturn(phantom, firstPage);
+        when(repository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(phantom, firstPage);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(3, 20, null);
+        PageEnvelope<BookResponse> envelope = service.listBooks(3, 20, null, null, null);
 
         assertThat(envelope.content()).isEmpty();
         assertThat(envelope.page().number()).isZero();
@@ -227,10 +238,42 @@ class BookServiceImplTest {
         // The re-fetch is only for past-the-end windows, so the FR-06 hot path
         // stays one repository call (NFR-02).
         Page<Book> page = new PageImpl<>(List.of(cleanCode()), PageRequest.of(2, 5), 12);
-        when(repository.findAll(any(Pageable.class))).thenReturn(page);
+        when(repository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(page);
 
-        service.listBooks(2, 5, null);
+        service.listBooks(2, 5, null, null, null);
 
-        verify(repository, times(1)).findAll(any(Pageable.class));
+        verify(repository, times(1)).findAll(any(Specification.class), any(Pageable.class));
+    }
+
+    @Test
+    void listBooks_whenSearchAndCategoryGiven_composesOneFilterForEveryFetch() {
+        // CA-08 + LC-11 combined: the past-the-end re-fetch must reuse the exact
+        // same filter instance the first fetch used, never rebuild it from
+        // defaults — a clamp that quietly drops the search or the category would
+        // serve the client unfiltered books on the last page.
+        PageImpl<Book> phantom = new PageImpl<>(List.of(), PageRequest.of(3, 2), 12);
+        PageImpl<Book> lastPage = new PageImpl<>(List.of(cleanCode()), PageRequest.of(5, 2), 12);
+        when(repository.findAll(any(Specification.class), any(Pageable.class))).thenReturn(phantom, lastPage);
+
+        service.listBooks(3, 2, null, "clean", TECHNOLOGY_ID);
+
+        ArgumentCaptor<Specification<Book>> captor = ArgumentCaptor.captor();
+        verify(repository, times(2)).findAll(captor.capture(), any(Pageable.class));
+        assertThat(captor.getAllValues().get(0)).isSameAs(captor.getAllValues().get(1));
+    }
+
+    @Test
+    void listBooks_whenNoFilterGiven_stillPassesAFilterToTheRepository() {
+        // An omitted search/category is "no criteria", never a skipped call: the
+        // browse page (CA-06) and the filtered page (CA-08) must share one
+        // repository path, so the FR-06 default sort and clamping above stay true
+        // for filtered requests too, not just unfiltered ones.
+        stubSinglePage(List.of(cleanCode()), 0, 20, 1);
+
+        service.listBooks(0, 20, null, null, null);
+
+        ArgumentCaptor<Specification<Book>> captor = ArgumentCaptor.captor();
+        verify(repository).findAll(captor.capture(), any(Pageable.class));
+        assertThat(captor.getValue()).isNotNull();
     }
 }

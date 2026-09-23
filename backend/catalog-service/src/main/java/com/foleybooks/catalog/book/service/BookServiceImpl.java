@@ -5,26 +5,43 @@ import com.foleybooks.catalog.book.api.BookSort;
 import com.foleybooks.catalog.book.domain.Book;
 import com.foleybooks.catalog.book.mapping.BookMapper;
 import com.foleybooks.catalog.book.repository.BookRepository;
+import com.foleybooks.catalog.book.repository.BookSpecifications;
 import com.foleybooks.catalog.common.PageEnvelope;
 import com.foleybooks.catalog.common.PageMeta;
+import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The FR-06 browse rule (CA-06, D-07), owned here exactly where C8 wants it —
- * never in the controller, never in the repository. Three numbers define it:
- * default size 20, max size 100, default sort title ascending. Which page a
- * request actually gets is the clamping of LC-11, decided <em>after</em> the
- * first fetch: the repository's own {@code Page} metadata says how many pages
- * exist, so a page past the last one is re-read as the last page (or as page 0
- * of an empty catalog) instead of serving a fabricated empty window — the
- * client's {@code page.number} always names the page it received.
+ * The FR-06 browse rule (CA-06, D-07) and the CA-08 filter's wiring (FR-08,
+ * FR-09), owned here exactly where C8 wants it — never in the controller, never
+ * in the repository. Three numbers define the paging: default size 20, max size
+ * 100, default sort title ascending. Which page a request actually gets is the
+ * clamping of LC-11, decided <em>after</em> the first fetch: the repository's own
+ * {@code Page} metadata says how many pages exist, so a page past the last one is
+ * re-read as the last page (or as page 0 of an empty catalog) instead of serving a
+ * fabricated empty window — the client's {@code page.number} always names the page
+ * it received.
+ *
+ * <p>The CA-08 {@code search}/{@code categoryId} filter is composed once, up
+ * front, into a single {@link Specification} ({@link BookSpecifications#matching}
+ * owns every query-execution rule behind that call — case-insensitive matching,
+ * metacharacter escaping, {@code AND} composition; trimming and the blank-means-
+ * no-filter decision already happened at the boundary, per C23) and reused
+ * verbatim on both the first fetch and the past-the-end re-fetch, so a clamp can
+ * never silently drop the filter the client asked for any more than it can drop
+ * the sort (see
+ * {@code listBooks_whenPastLastPageIsRefetched_preservesTheRequestedSort}).
  *
  * <p>Malformed non-numeric parameters never reach this class: the MVC binder
- * rejects them with a 400 at the boundary (LC-28, D-15). The projection goes
+ * rejects them with a 400 at the boundary (LC-28, D-15) — the same is true of a
+ * malformed {@code categoryId} or an over-long {@code search}, neither ever a
+ * "no matches" result but a boundary rejection before this method is called.
+ * The projection goes
  * through {@link BookMapper#toResponseList} (ADR-009: the mapper owns the
  * shape at every cardinality) inside the read-only transaction, so the lazy
  * category is still resolvable ({@code open-in-view} is off), and the
@@ -53,13 +70,14 @@ public class BookServiceImpl implements BookService {
 
     @Override
     @Transactional(readOnly = true)
-    public PageEnvelope<BookResponse> listBooks(int page, int size, BookSort sort) {
+    public PageEnvelope<BookResponse> listBooks(int page, int size, BookSort sort, String search, UUID categoryId) {
         Sort effectiveSort = toSpringSort(sort);
         int effectiveSize = clampSize(size);
         int requestedPage = Math.max(page, 0);
-        Page<Book> books = bookRepository.findAll(PageRequest.of(requestedPage, effectiveSize, effectiveSort));
+        Specification<Book> filter = BookSpecifications.matching(search, categoryId);
+        Page<Book> books = bookRepository.findAll(filter, PageRequest.of(requestedPage, effectiveSize, effectiveSort));
         if (requestedPage > 0 && !books.hasContent()) {
-            books = bookRepository.findAll(PageRequest.of(lastPageIndex(books), effectiveSize, effectiveSort));
+            books = bookRepository.findAll(filter, PageRequest.of(lastPageIndex(books), effectiveSize, effectiveSort));
         }
         return new PageEnvelope<>(bookMapper.toResponseList(books.getContent()), pageMeta(books));
     }
