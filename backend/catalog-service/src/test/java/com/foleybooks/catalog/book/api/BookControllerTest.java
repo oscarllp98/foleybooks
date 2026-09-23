@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.foleybooks.catalog.book.service.BookNotFoundException;
 import com.foleybooks.catalog.book.service.BookService;
 import com.foleybooks.catalog.category.api.CategoryResponse;
 import com.foleybooks.catalog.common.PageEnvelope;
@@ -59,6 +60,12 @@ import org.springframework.test.web.servlet.MockMvc;
  * long query strings" clause, newly reachable now that this endpoint takes free
  * text at all) and never reaches the service; and a malformed {@code categoryId}
  * rides the same shared 400 path as a malformed {@code page} (LC-28).
+ *
+ * <p>CA-09's {@code GET /books/{id}} (FR-07) is asserted by the same rules: an
+ * anonymous 200 carrying every FR-07 field of the plan §2 shape, a 404 ProblemDetail
+ * rendered by the real advice when the service reports no such book, and a
+ * malformed id rejected by the binder before the service is touched — the path
+ * variable version of the page/size/sort/categoryId asymmetry above.
  */
 @WebMvcTest(BookController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class, BookSortConverter.class})
@@ -66,6 +73,7 @@ class BookControllerTest {
 
     private static final UUID CLEAN_CODE_ID = UUID.fromString("00000000-0000-0000-0000-00000000cb06");
     private static final UUID TECHNOLOGY_ID = UUID.fromString("00000000-0000-0000-0000-00000000ca02");
+    private static final UUID UNKNOWN_ID = UUID.fromString("00000000-0000-0000-0000-00000000cb99");
 
     private static final BookResponse CLEAN_CODE = new BookResponse(
             CLEAN_CODE_ID, "Clean Code", "Robert C. Martin", "9780132350884",
@@ -364,5 +372,82 @@ class BookControllerTest {
                 .andExpect(status().isOk());
 
         verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, atLimit, null);
+    }
+
+    // ------------------------------------------------------------------ CA-09: GET /books/{id}
+
+    @Test
+    void getBook_whenRequestedAnonymously_responds200WithEveryFr07Field() throws Exception {
+        // FR-07's detail, and the anonymous 200 is again the proof of the spot on
+        // the public allowlist (C22): GET /api/v1/books/** needs no token, and the
+        // real SecurityConfig runs in-slice (C25). The field list is the FR-07
+        // promise — title, ISBN, author, price, cover, category, availability —
+        // and, per ADR-009, literally the same BookResponse shape the list above
+        // publishes, so a card and the page it links to cannot drift.
+        when(bookService.getBook(CLEAN_CODE_ID)).thenReturn(CLEAN_CODE);
+
+        mockMvc.perform(get("/api/v1/books/{id}", CLEAN_CODE_ID))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(CLEAN_CODE_ID.toString()))
+                .andExpect(jsonPath("$.title").value("Clean Code"))
+                .andExpect(jsonPath("$.author").value("Robert C. Martin"))
+                .andExpect(jsonPath("$.isbn").value("9780132350884"))
+                .andExpect(jsonPath("$.price").value(31.99))
+                .andExpect(jsonPath("$.coverUrl")
+                        .value("https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg"))
+                .andExpect(jsonPath("$.availability").value("IN_STOCK"))
+                .andExpect(jsonPath("$.stockQuantity").value(12))
+                .andExpect(jsonPath("$.category.id").value(TECHNOLOGY_ID.toString()))
+                .andExpect(jsonPath("$.category.name").value("Technology"))
+                // Nothing but the reviewed contract crosses the boundary (C9).
+                .andExpect(jsonPath("$.createdAt").doesNotExist())
+                .andExpect(jsonPath("$.updatedAt").doesNotExist());
+
+        verify(bookService).getBook(CLEAN_CODE_ID);
+    }
+
+    @Test
+    void getBook_whenIdMatchesNoBook_responds404ProblemDetailWithThePublishedUrn() throws Exception {
+        // Plan §6.2's "detail 200/404 (FR-07)": the unknown half is the shared
+        // advice's job (D-15), so the real GlobalExceptionHandler renders the
+        // service's BookNotFoundException as an RFC 7807 body — declared URN,
+        // request path as instance, the echoed bookId property and a traceId —
+        // with no HTML error page and no stack detail anywhere in it.
+        when(bookService.getBook(UNKNOWN_ID)).thenThrow(BookNotFoundException.forId(UNKNOWN_ID));
+
+        mockMvc.perform(get("/api/v1/books/{id}", UNKNOWN_ID))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:book-not-found"))
+                .andExpect(jsonPath("$.title").value("Book not found"))
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.detail").value("No book exists with the given id."))
+                .andExpect(jsonPath("$.bookId").value(UNKNOWN_ID.toString()))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/" + UNKNOWN_ID))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verify(bookService).getBook(UNKNOWN_ID);
+    }
+
+    @ParameterizedTest(name = "bookId_malformed_rejected: id={0} is a 400 validation error (LC-28)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "00000000-0000-0000-0000-00000000cb0z",
+            "' OR 1=1--"})
+    void bookId_malformed_rejectedWith400Validation(String rawId) throws Exception {
+        // LC-28's asymmetry, now on a path variable instead of a query parameter:
+        // an id Spring cannot parse is a validation error at the boundary — the
+        // same shared 400 a bad page, size, sort or categoryId earns — while a
+        // well-formed id that names no book is a 404 (test above). Deciding that
+        // by hand would be business logic in the controller (C8); the binder owns it.
+        mockMvc.perform(get("/api/v1/books/{id}", rawId))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("id"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
     }
 }

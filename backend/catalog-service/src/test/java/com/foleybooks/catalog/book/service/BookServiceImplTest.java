@@ -1,8 +1,10 @@
 package com.foleybooks.catalog.book.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -16,9 +18,11 @@ import com.foleybooks.catalog.book.repository.BookRepository;
 import com.foleybooks.catalog.category.api.CategoryResponse;
 import com.foleybooks.catalog.category.domain.Category;
 import com.foleybooks.catalog.category.mapping.CategoryMapperImpl;
+import com.foleybooks.catalog.common.ApiException;
 import com.foleybooks.catalog.common.PageEnvelope;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -60,6 +64,15 @@ import org.springframework.test.util.ReflectionTestUtils;
  * past-the-end re-fetch, so a clamp can never silently drop the search or the
  * category the client asked for — and an omitted filter is a well-formed
  * "no criteria" call, never a skipped one.
+ *
+ * <p>CA-09's detail read (FR-07) is the other half of this seam: one
+ * {@code findById}, the same shipped mapper producing the plan §2 shape, and the
+ * published 404 contract — status, URN, title, detail and the echoed
+ * {@code bookId} — when the id resolves to no row. That exception is what the
+ * shared advice renders as a ProblemDetail (D-15); its wire shape is asserted in
+ * {@code BookControllerTest}, and the lazy-category resolution the in-transaction
+ * projection guarantees is proven against real PostgreSQL by
+ * {@code CatalogServiceApplicationTests}.
  */
 class BookServiceImplTest {
 
@@ -275,5 +288,71 @@ class BookServiceImplTest {
         ArgumentCaptor<Specification<Book>> captor = ArgumentCaptor.captor();
         verify(repository).findAll(captor.capture(), any(Pageable.class));
         assertThat(captor.getValue()).isNotNull();
+    }
+
+    // ------------------------------------------------------------------ CA-09: detail (FR-07)
+
+    @Test
+    void getBook_whenIdMatchesABook_projectsTheSameShapeTheListServes() {
+        // FR-07 through ADR-009's single-owner rule: the detail is one findById
+        // plus the one entity-to-record projection the list uses, so every field
+        // the BookDetail page renders — including the nested category, which the
+        // entity keeps lazy — is published by the shipped mapper, not by a
+        // hand-built copy that could drift from the card beside it.
+        when(repository.findById(CLEAN_CODE_ID)).thenReturn(Optional.of(cleanCode()));
+
+        BookResponse detail = service.getBook(CLEAN_CODE_ID);
+
+        assertThat(detail).isEqualTo(new BookResponse(CLEAN_CODE_ID, "Clean Code", "Robert C. Martin",
+                "9780132350884", new BigDecimal("31.99"),
+                "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg",
+                Availability.IN_STOCK, 12, new CategoryResponse(TECHNOLOGY_ID, "Technology")));
+        verify(repository).findById(CLEAN_CODE_ID);
+    }
+
+    @ParameterizedTest(name = "detail_badge: stock={0} derives {1} on the FR-07 read (D-09)")
+    @CsvSource({
+            "0, OUT_OF_STOCK",
+            "1, LOW_STOCK",
+            "5, LOW_STOCK",
+            "6, IN_STOCK",
+            "12, IN_STOCK"
+    })
+    void getBook_whenStockVaries_derivesTheBadgeFromThePublishedQuantity(int stock, Availability expected) {
+        // D-09's three buckets, observed through the detail read rather than only
+        // through the policy: the badge and the exact quantity travel together in
+        // one projection, so they cannot be observed disagreeing (FR-10/LC-12
+        // bound the quantity selector by that same number).
+        Book stocked = new Book(technology(), "Clean Code", "Robert C. Martin", "9780132350884",
+                new BigDecimal("31.99"), stock, "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg");
+        ReflectionTestUtils.setField(stocked, "id", CLEAN_CODE_ID);
+        when(repository.findById(CLEAN_CODE_ID)).thenReturn(Optional.of(stocked));
+
+        BookResponse detail = service.getBook(CLEAN_CODE_ID);
+
+        assertThat(detail.stockQuantity()).isEqualTo(stock);
+        assertThat(detail.availability()).isEqualTo(expected);
+    }
+
+    @Test
+    void getBook_whenIdMatchesNoBook_throwsThePublishedNotFoundProblem() {
+        // FR-07's 404 half: a well-formed id with no row is a declared
+        // ApiException — status, URN, title, detail and the echoed bookId are part
+        // of the wire contract (plan §2, D-15), which is what the shared advice
+        // renders; the repository is consulted once and no projection is built.
+        UUID missingId = UUID.fromString("00000000-0000-0000-0000-00000000cb99");
+        when(repository.findById(missingId)).thenReturn(Optional.empty());
+
+        BookNotFoundException thrown = catchThrowableOfType(
+                () -> service.getBook(missingId), BookNotFoundException.class);
+
+        assertThat(thrown).isNotNull();
+        assertThat(thrown).extracting(
+                ex -> ((ApiException) ex).getStatus().value(),
+                ApiException::getType, ApiException::getTitle, ApiException::getDetail)
+                .containsExactly(404, "urn:foley-books:problem:book-not-found",
+                        "Book not found", "No book exists with the given id.");
+        assertThat(thrown.getProperties()).containsEntry("bookId", missingId.toString());
+        verify(repository, never()).findAll(any(Specification.class), any(Pageable.class));
     }
 }

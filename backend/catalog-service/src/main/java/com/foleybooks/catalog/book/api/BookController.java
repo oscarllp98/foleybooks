@@ -9,6 +9,7 @@ import jakarta.validation.constraints.Size;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -50,11 +51,24 @@ import org.springframework.web.bind.annotation.RestController;
   * no category is simply "no matches" (FR-09, LC-31) — that asymmetry is the
   * binder's, not a check to hand-roll here.
   *
-  * <p>The route sits on the SecurityConfig public GET allowlist (C22): browsing
-  * the catalog presupposes no token, and the anonymous 200 in the slice test is
-  * the proof of that spot (plan §6.2). The response is the standard pagination
-  * envelope ({@code content} + {@code page}, {@link PageEnvelope}) of plan §2.
-  */
+ * <p>The route sits on the SecurityConfig public GET allowlist (C22): browsing
+ * the catalog presupposes no token, and the anonymous 200 in the slice test is
+ * the proof of that spot (plan §6.2). The response is the standard pagination
+ * envelope ({@code content} + {@code page}, {@link PageEnvelope}) of plan §2.
+ *
+ * <p>{@code GET /books/{id}} (FR-07, CA-09) is the detail half of the same
+ * public read model and gets the identical boundary treatment: a UUID-typed path
+ * variable needs no converter, because Spring's own {@code String -> UUID}
+ * binding rejects a malformed id with the shared 400 validation ProblemDetail —
+ * the same LC-28 asymmetry that already separates an unparseable
+ * {@code categoryId} from one that simply names no category. Here the
+ * well-formed-but-unknown half is a 404, not an empty page: a list browse has a
+ * legitimate nothing-to-show state (FR-06, LC-31) while a detail page for an id
+ * the client was handed has none, so {@link com.foleybooks.catalog.book.service.BookService#getBook}
+ * answers it and the shared advice renders {@code urn:foley-books:problem:book-not-found}.
+ * The controller contributes no rule of its own (C8) — no id is ever a "not
+ * found" by its shape, and no book list is consulted here to decide.
+ */
 @RestController
 @RequestMapping("/api/v1/books")
 @Tag(name = "Catalog", description = "Browse, search and inspect the book catalog (FR-06..FR-08)")
@@ -100,6 +114,20 @@ public class BookController {
                     example = "00000000-0000-0000-0000-00000000ca02")
             @RequestParam(name = "categoryId", required = false) UUID categoryId) {
         return ResponseEntity.ok(bookService.listBooks(page, size, sort, normalizeSearch(search), categoryId));
+    }
+
+    @GetMapping("/{id}")
+    @Operation(summary = "Get a book by id",
+            description = "Full detail of one book (FR-07): title, ISBN, author, price in EUR, cover, category "
+                    + "and the derived availability badge. The response shape is the same BookResponse the list "
+                    + "serves, so a card and the page it links to cannot disagree. A well-formed id matching no "
+                    + "book is a 404; a malformed, unparseable id is a validation error answered before the "
+                    + "catalog is read.")
+    public ResponseEntity<BookResponse> getBook(
+            @Parameter(description = "Public UUID of the book, exactly as the list response published it.",
+                    example = "00000000-0000-0000-0000-00000000cb06")
+            @PathVariable(name = "id") UUID id) {
+        return ResponseEntity.ok(bookService.getBook(id));
     }
 
     /**

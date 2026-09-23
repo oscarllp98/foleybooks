@@ -47,6 +47,11 @@ import org.springframework.transaction.annotation.Transactional;
  * category is still resolvable ({@code open-in-view} is off), and the
  * {@link PageMeta} is assembled here — the wire records in {@code common}
  * never learn Spring Data exists (C7). No entity escapes (C9).
+ *
+ * <p>{@link #getBook(UUID)} is CA-09's detail read on the same collaborators:
+ * one {@code findById}, the same mapper, and a {@link BookNotFoundException}
+ * when the id resolves to no row — the service's own 404, never a controller
+ * null-check (C8).
  */
 @Service
 public class BookServiceImpl implements BookService {
@@ -80,6 +85,24 @@ public class BookServiceImpl implements BookService {
             books = bookRepository.findAll(filter, PageRequest.of(lastPageIndex(books), effectiveSize, effectiveSort));
         }
         return new PageEnvelope<>(bookMapper.toResponseList(books.getContent()), pageMeta(books));
+    }
+
+    /**
+     * FR-07's detail read (CA-09). One {@code findById} and one projection
+     * through the same {@link BookMapper#toResponse} the list uses (ADR-009), so
+     * the badge a card shows and the badge the detail page shows are computed by
+     * one owner from one stored quantity (D-09). The mapping happens
+     * <em>inside</em> this read-only transaction on purpose: {@code category} is
+     * a lazy proxy and {@code open-in-view} is off (application.yml), so a
+     * projection deferred to the controller would surface as a
+     * {@code LazyInitializationException} — a 500 for a book that exists.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public BookResponse getBook(UUID id) {
+        return bookRepository.findById(id)
+                .map(bookMapper::toResponse)
+                .orElseThrow(() -> BookNotFoundException.forId(id));
     }
 
     /**

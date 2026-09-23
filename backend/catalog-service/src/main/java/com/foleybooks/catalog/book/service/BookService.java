@@ -64,4 +64,23 @@ public interface BookService {
      *         page actually served
      */
     PageEnvelope<BookResponse> listBooks(int page, int size, BookSort sort, String search, UUID categoryId);
+
+    /**
+     * One book's detail (FR-07, CA-09): the full {@link BookResponse} shape —
+     * identity, listing fields, the derived {@link
+     * com.foleybooks.catalog.book.api.Availability} badge and the embedded
+     * category — the same projection the list serves, so a card and the page it
+     * links to can never disagree about a price or a badge (ADR-009).
+     *
+     * <p>Only one outcome is possible for an id that already parsed: the row is
+     * found, or it is not and {@link BookNotFoundException} answers 404. A
+     * malformed id is never this method's problem — the MVC binder rejects it as
+     * a 400 validation error at the boundary (LC-28), exactly as it does for a
+     * malformed {@code page} or {@code categoryId}.
+     *
+     * @param id public identifier of the book to read, already parsed by the binder
+     * @return the FR-07 detail record
+     * @throws BookNotFoundException if no book exists with that id
+     */
+    BookResponse getBook(UUID id);
 }
