@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.foleybooks.catalog.book.api.Availability;
 import com.foleybooks.catalog.book.api.BookResponse;
+import com.foleybooks.catalog.book.api.BookSort;
 import com.foleybooks.catalog.book.domain.Book;
 import com.foleybooks.catalog.book.mapping.BookMapperImpl;
 import com.foleybooks.catalog.book.repository.BookRepository;
@@ -32,18 +33,22 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * FR-06's browse rule at the repository seam (plan §6.1, LC-11): the exact
- * {@link Pageable} the service asks for, the title-ascending default sort, and
- * the envelope that comes back. The plan §6.1 entry {@code pagination_clampsRanges}
- * is carried by {@link #pagination_clampsRanges(int, int, int, int)} plus the
- * two page-clamp-behind-a-second-fetch tests below: LC-11's numeric clamps that
- * only change the request live in the parameterized rows, while "page past the
- * last → last page" is only decidable after the first fetch, so it owns its own
- * scenarios. The clamp of a past-the-end page is the whole point of fetching
- * through the service rather than binding the request straight into a
- * {@code Pageable} argument resolver: Spring's own resolver would happily serve
- * an empty phantom window. The mapper is the real CA-05 generated one, so the
- * badge and category inside the envelope are derived by the shipped wiring, not
- * a mock's opinion (C8, ADR-009).
+ * {@link Pageable} the service asks for, the sort it carries, and the envelope
+ * that comes back. The plan §6.1 entry {@code pagination_clampsRanges} is carried
+ * by {@link #pagination_clampsRanges(int, int, int, int)} plus the two
+ * page-clamp-behind-a-second-fetch tests below: LC-11's numeric clamps that only
+ * change the request live in the parameterized rows, while "page past the last →
+ * last page" is only decidable after the first fetch, so it owns its own
+ * scenarios. CA-07's sort reaches the service already whitelisted (the boundary
+ * converter rejects anything else), so these tests prove the service turns a
+ * {@link BookSort} into the right Spring Data {@code Sort} — and keeps that same
+ * sort on the past-the-end re-fetch — while a {@code null} sort still answers
+ * with the FR-06 title-ascending default. The clamp of a past-the-end page is
+ * the whole point of fetching through the service rather than binding the
+ * request straight into a {@code Pageable} argument resolver: Spring's own
+ * resolver would happily serve an empty phantom window. The mapper is the real
+ * CA-05 generated one, so the badge and category inside the envelope are derived
+ * by the shipped wiring, not a mock's opinion (C8, ADR-009).
  */
 class BookServiceImplTest {
 
@@ -85,7 +90,7 @@ class BookServiceImplTest {
         // pageSize > total), and the envelope must publish the repository's own numbers.
         stubSinglePage(List.of(cleanCode()), 0, 20, 25);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(0, 20);
+        PageEnvelope<BookResponse> envelope = service.listBooks(0, 20, null);
 
         Pageable request = capturedRequest();
         assertThat(request.getPageNumber()).isZero();
@@ -108,6 +113,31 @@ class BookServiceImplTest {
         assertThat(envelope.page().size()).isEqualTo(BookService.DEFAULT_SIZE);
     }
 
+    @Test
+    void listBooks_whenPriceDescendingRequested_sortsByPriceDescending() {
+        // CA-07: a whitelisted BookSort is translated straight into the Spring
+        // Data Sort the query uses — price, descending, with no title order.
+        stubSinglePage(List.of(cleanCode()), 0, 20, 25);
+
+        service.listBooks(0, 20, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC));
+
+        Sort.Order priceOrder = capturedRequest().getSort().getOrderFor("price");
+        assertThat(priceOrder).isNotNull();
+        assertThat(priceOrder.getDirection()).isEqualTo(Sort.Direction.DESC);
+        assertThat(capturedRequest().getSort().getOrderFor("title")).isNull();
+    }
+
+    @Test
+    void listBooks_whenTitleAscendingRequested_sortsByTitleAscending() {
+        stubSinglePage(List.of(cleanCode()), 0, 20, 25);
+
+        service.listBooks(0, 20, new BookSort(BookSort.Field.TITLE, BookSort.Direction.ASC));
+
+        Sort.Order titleOrder = capturedRequest().getSort().getOrderFor("title");
+        assertThat(titleOrder).isNotNull();
+        assertThat(titleOrder.getDirection()).isEqualTo(Sort.Direction.ASC);
+    }
+
     @ParameterizedTest(name = "pagination_clampsRanges: page={0} size={1} -> effective page={2} size={3} (LC-11)")
     @CsvSource({
             "-1, 20, 0, 20",
@@ -126,7 +156,7 @@ class BookServiceImplTest {
         // past-the-last-page re-fetch; that rule owns its own tests below.
         stubSinglePage(List.of(cleanCode()), effectivePage, effectiveSize, 12_000);
 
-        service.listBooks(page, size);
+        service.listBooks(page, size, null);
 
         Pageable request = capturedRequest();
         assertThat(request.getPageNumber()).isEqualTo(effectivePage);
@@ -141,7 +171,7 @@ class BookServiceImplTest {
         PageImpl<Book> lastPage = new PageImpl<>(List.of(cleanCode(), cleanCode()), PageRequest.of(5, 2), 12);
         when(repository.findAll(any(Pageable.class))).thenReturn(phantom, lastPage);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(3, 2);
+        PageEnvelope<BookResponse> envelope = service.listBooks(3, 2, null);
 
         ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
         verify(repository, times(2)).findAll(captor.capture());
@@ -157,6 +187,25 @@ class BookServiceImplTest {
     }
 
     @Test
+    void listBooks_whenPastLastPageIsRefetched_preservesTheRequestedSort() {
+        // CA-07 + LC-11 combined: the re-fetch that lands on the last page must
+        // carry the client's chosen sort, not silently revert to the default.
+        PageImpl<Book> phantom = new PageImpl<>(List.of(), PageRequest.of(3, 2), 12);
+        PageImpl<Book> lastPage = new PageImpl<>(List.of(cleanCode()), PageRequest.of(5, 2), 12);
+        when(repository.findAll(any(Pageable.class))).thenReturn(phantom, lastPage);
+
+        service.listBooks(3, 2, new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC));
+
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(repository, times(2)).findAll(captor.capture());
+        for (Pageable request : captor.getAllValues()) {
+            Sort.Order priceOrder = request.getSort().getOrderFor("price");
+            assertThat(priceOrder).isNotNull();
+            assertThat(priceOrder.getDirection()).isEqualTo(Sort.Direction.DESC);
+        }
+    }
+
+    @Test
     void listBooks_whenCatalogIsEmpty_servesPageZeroWithAnEmptyEnvelope() {
         // An empty catalog has no "last page" — clamping past-the-end lands on
         // page 0, and the empty state stays a 200 with empty content (FR-06),
@@ -165,7 +214,7 @@ class BookServiceImplTest {
         PageImpl<Book> firstPage = new PageImpl<>(List.of(), PageRequest.of(0, 20), 0);
         when(repository.findAll(any(Pageable.class))).thenReturn(phantom, firstPage);
 
-        PageEnvelope<BookResponse> envelope = service.listBooks(3, 20);
+        PageEnvelope<BookResponse> envelope = service.listBooks(3, 20, null);
 
         assertThat(envelope.content()).isEmpty();
         assertThat(envelope.page().number()).isZero();
@@ -180,7 +229,7 @@ class BookServiceImplTest {
         Page<Book> page = new PageImpl<>(List.of(cleanCode()), PageRequest.of(2, 5), 12);
         when(repository.findAll(any(Pageable.class))).thenReturn(page);
 
-        service.listBooks(2, 5);
+        service.listBooks(2, 5, null);
 
         verify(repository, times(1)).findAll(any(Pageable.class));
     }

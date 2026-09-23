@@ -1,6 +1,7 @@
 package com.foleybooks.catalog.book.service;
 
 import com.foleybooks.catalog.book.api.BookResponse;
+import com.foleybooks.catalog.book.api.BookSort;
 import com.foleybooks.catalog.common.PageEnvelope;
 
 /**
@@ -31,10 +32,18 @@ public interface BookService {
      * this method — the MVC binder answers them with a 400 validation
      * ProblemDetail at the boundary (LC-28).
      *
+     * <p>The {@code sort} selection (CA-07, FR-06) is likewise already validated
+     * at the boundary: {@code BookSortConverter} whitelists it to {@code title}
+     * or {@code price} with an ascending/descending direction, so anything that
+     * arrives here is safe to feed straight into the query. A {@code null} sort —
+     * the parameter omitted or left blank — falls back to the FR-06 default of
+     * title ascending.
+     *
      * @param page zero-based page index to serve, clamped into range
      * @param size page size to serve, clamped to {@code 1..100}, default 20
+     * @param sort validated sort selection, or {@code null} for the default
      * @return the AGENTS.md §6 envelope: mapped books plus the metadata of the
      *         page actually served
      */
-    PageEnvelope<BookResponse> listBooks(int page, int size);
+    PageEnvelope<BookResponse> listBooks(int page, int size, BookSort sort);
 }

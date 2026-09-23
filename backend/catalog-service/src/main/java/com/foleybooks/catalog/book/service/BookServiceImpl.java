@@ -1,6 +1,7 @@
 package com.foleybooks.catalog.book.service;
 
 import com.foleybooks.catalog.book.api.BookResponse;
+import com.foleybooks.catalog.book.api.BookSort;
 import com.foleybooks.catalog.book.domain.Book;
 import com.foleybooks.catalog.book.mapping.BookMapper;
 import com.foleybooks.catalog.book.repository.BookRepository;
@@ -34,8 +35,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class BookServiceImpl implements BookService {
 
     /**
-     * FR-06's default sort. {@code "title"} is the entity property; CA-07 turns
-     * this into a whitelist the client can pick from, but the default stays.
+     * FR-06's default sort, applied when the client asks for none (the omitted or
+     * blank {@code sort} parameter). CA-07's whitelist lives in the boundary
+     * ({@code BookSortConverter}), so every {@link BookSort} that reaches this
+     * class is already one the query can resolve; the default stays title
+     * ascending.
      */
     private static final Sort DEFAULT_SORT = Sort.by(Sort.Direction.ASC, "title");
 
@@ -49,14 +53,31 @@ public class BookServiceImpl implements BookService {
 
     @Override
     @Transactional(readOnly = true)
-    public PageEnvelope<BookResponse> listBooks(int page, int size) {
+    public PageEnvelope<BookResponse> listBooks(int page, int size, BookSort sort) {
+        Sort effectiveSort = toSpringSort(sort);
         int effectiveSize = clampSize(size);
         int requestedPage = Math.max(page, 0);
-        Page<Book> books = bookRepository.findAll(PageRequest.of(requestedPage, effectiveSize, DEFAULT_SORT));
+        Page<Book> books = bookRepository.findAll(PageRequest.of(requestedPage, effectiveSize, effectiveSort));
         if (requestedPage > 0 && !books.hasContent()) {
-            books = bookRepository.findAll(PageRequest.of(lastPageIndex(books), effectiveSize, DEFAULT_SORT));
+            books = bookRepository.findAll(PageRequest.of(lastPageIndex(books), effectiveSize, effectiveSort));
         }
         return new PageEnvelope<>(bookMapper.toResponseList(books.getContent()), pageMeta(books));
+    }
+
+    /**
+     * The single seam where a {@link BookSort} becomes the Spring Data {@code Sort}
+     * the repository consumes; {@code null} — the sort parameter omitted or left
+     * blank — answers with the FR-06 default of title ascending.
+     */
+    private static Sort toSpringSort(BookSort sort) {
+        if (sort == null) {
+            return DEFAULT_SORT;
+        }
+        Sort.Direction direction = switch (sort.direction()) {
+            case ASC -> Sort.Direction.ASC;
+            case DESC -> Sort.Direction.DESC;
+        };
+        return Sort.by(direction, sort.field().property());
     }
 
     /** LC-11: {@code size < 1 → 20}, {@code size > 100 → 100}; everything else is honored. */

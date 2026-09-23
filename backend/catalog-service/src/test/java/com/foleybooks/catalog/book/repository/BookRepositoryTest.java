@@ -7,6 +7,7 @@ import com.foleybooks.catalog.book.domain.Book;
 import com.foleybooks.catalog.category.domain.Category;
 import com.foleybooks.catalog.category.repository.CategoryRepository;
 import java.math.BigDecimal;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -147,6 +148,23 @@ class BookRepositoryTest {
         assertThat(firstWindow.getTotalPages()).isEqualTo(3);
         assertThat(firstWindow.getNumber()).isZero();
         assertThat(firstWindow.getSize()).isEqualTo(5);
+    }
+
+    @Test
+    void findAll_whenPagedWithPriceSort_ordersSeedCatalogByPriceBothDirections() {
+        // CA-07 whitelists "price" as a sortable field (FR-06). The query is built
+        // from the entity property, so this proves the whitelisted name actually
+        // resolves on the real mapping (Spring Data would raise PropertyReferenceException
+        // otherwise) and returns a genuinely ordered window in both directions.
+        List<BigDecimal> ascending = bookRepository
+                .findAll(PageRequest.of(0, 12, Sort.by(Sort.Direction.ASC, "price")))
+                .getContent().stream().map(Book::getPrice).toList();
+        List<BigDecimal> descending = bookRepository
+                .findAll(PageRequest.of(0, 12, Sort.by(Sort.Direction.DESC, "price")))
+                .getContent().stream().map(Book::getPrice).toList();
+
+        assertThat(ascending).isSorted().hasSize(12);
+        assertThat(descending).isSortedAccordingTo(Comparator.reverseOrder()).hasSize(12);
     }
 
     @Test
