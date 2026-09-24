@@ -40,9 +40,9 @@ public interface BookMapper {
     BookResponse toResponse(Book book);
 
     /**
-     * The list/page projection consumed by the read paths (ADR-009: "list/page
-     * mapping is added by the task that consumes it" — CA-06 here, CA-10/CA-11
-     * later). MapStruct generates it as a loop over {@link #toResponse(Book)},
+     * The list/batch projection consumed by the read paths (ADR-009: "list/page
+     * mapping is added by the task that consumes it" — CA-06 for pages, CA-11 for
+     * the batch). MapStruct generates it as a loop over {@link #toResponse(Book)},
      * so a collection can never drift from the single-entity contract: one
      * owner per shape, at every cardinality. A {@code null} list maps to
      * {@code null}; Spring Data hands out empty lists, never nulls.

@@ -357,6 +357,29 @@ class BookRepositoryTest {
     }
 
     @Test
+    void findAllById_whenSomeIdsMatchNoBook_returnsOnlyTheExistingRows() {
+        // CA-11/D-10's subset semantics, only provable against real SQL (the
+        // service unit test mocks this repository): findAllById is one
+        // `WHERE id IN (...)` that answers the rows present and silently omits
+        // the ids that name none — exactly the LC-14 "absent line" the cart
+        // enrichment consumes. Seeded ids resolve to rows; a random UUID does not.
+        // The result is asserted as a set because IN-order is not contractual, and
+        // the empty-collection case is deliberately NOT probed here — Spring Data
+        // leaves findAllById over an empty iterable undefined, which is the exact
+        // reason BookServiceImpl.getBooks short-circuits it before reaching the
+        // repository (proven in the service unit test), so the repository contract
+        // legitimately starts at one id.
+        UUID cleanCodeId = UUID.fromString("00000000-0000-0000-0000-00000000cb06");
+        UUID gatsbyId = UUID.fromString("00000000-0000-0000-0000-00000000cb03");
+        UUID vanishedId = UUID.randomUUID();
+
+        List<Book> found = bookRepository.findAllById(List.of(cleanCodeId, vanishedId, gatsbyId));
+
+        assertThat(found).extracting(Book::getId)
+                .containsExactlyInAnyOrder(cleanCodeId, gatsbyId);
+    }
+
+    @Test
     void save_whenIsbnAlreadyExists_throwsDataIntegrityViolation() {
         // uk_books_isbn: a duplicate ISBN would be two indistinguishable entries
         // of one real book — the anchor of the D-11 cover hotlinking (ADR-003).

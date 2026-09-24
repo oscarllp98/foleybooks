@@ -115,6 +115,56 @@ model (not a schema, security or dependency change, so no new ADR is triggered):
   code — consistent with ADR-003 ("the empty state is a read-side outcome,
   never an error").
 
+### Amendment (CA-11): the batch read's surface
+
+Delivered with `GET /books/batch?ids=` (D-10), the catalog side of the
+cart-enrichment contract, on this ADR's authority (the record is unchanged; no
+schema, security or dependency decision is made here, so no new ADR is
+triggered — ADR-005 owns the order-service's Feign client and enrichment logic
+built on top of this endpoint):
+
+- **A bare `[BookResponse]` array, not a `PageEnvelope`.** The list and category
+  reads are *pages* a human browses, so they carry the §6 envelope's totals; the
+  batch is a keyed lookup the cart consumes by `id`, which the plan §2 endpoint
+  map already specifies as a raw array. Wrapping it would invent paging
+  semantics (a "page" of what the caller already named) that D-10 never asked
+  for. The elements are the identical `BookResponse` record, produced by the one
+  `BookMapper.toResponseList` — so an enriched cart line cannot drift from the
+  catalog card beside it.
+- **An unknown id is absent, never a 404** — the deliberate inversion of
+  `GET /books/{id}`'s contract. `getBook` must insist on the single row the
+  client named (LC-28's asymmetry: parseable-but-missing is the one legitimate
+  404); `getBooks` reports which of many ids exist, because the cart's defensive
+  "this line's book vanished" state (LC-14) is *read from the gap* in the
+  response. A 404 would make that unreachable state unrepresentable and let one
+  dead line fail the whole enrichment read. Duplicated ids collapse to one entry
+  each and order is not contractual, both free consequences of the single
+  `WHERE id IN (...)` (`findAllById`) that also satisfies D-10's one-Feign-call
+  rule.
+- **Boundary rules ride the existing paths, unchanged.** A malformed id in the
+  `ids` list is the shared 400 validation `ProblemDetail` (field `ids`) via
+  Spring's own `String -> UUID` conversion (LC-28, C23) — a well-formed id that
+  simply names no book stays an absent entry, not a rejection. The id count is
+  capped at `MAX_SIZE` (100) by a parameter `@Size` so one batched read can
+  never outgrow a browsed page and an extremely long query string is refused at
+  the boundary (LC-28) — a *rejection*, not a clamp, because there is no way to
+  clamp "which specific books" a cart asked for without silently dropping lines.
+  That cap is also the reason the batch satisfies NFR-02's "all lists paginated"
+  while returning a bare array: it is bounded by the same one-page ceiling rather
+  than left unbounded, so no paginated envelope is needed to keep the read
+  bounded. **Absent and blank both answer `[]`, never a 400**: an *absent* `?ids=`
+  binds to `null`, and a *present-but-blank* `ids=` collapses (via Spring's single-
+  value handling and the comma-dropping `StringToCollectionConverter`) to an empty
+  `List`, so neither is the "required" error a scalar `@RequestParam` would raise —
+  FR-11's empty cart is an empty array either way. The `isEmpty()` short-circuit is
+  therefore genuinely HTTP-reachable (the blank path) *and* avoids the case Spring
+  Data leaves undefined (`findAllById` over an empty iterable). A *non-blank*
+  unparseable id, by contrast, is a real `String -> UUID` failure and so a 400 —
+  the malformed/empty asymmetry is exactly LC-28's, and both blank- and
+  malformed-`ids` cases are pinned by slice tests. The route inherits
+  `GET /api/v1/books/**` on the public allowlist (C22, ADR-008) with no matcher
+  change — it is a catalog read like every other GET here.
+
 ## Consequences
 
 - C8 holds literally: the only rule CA-05 introduced is in a service class, and

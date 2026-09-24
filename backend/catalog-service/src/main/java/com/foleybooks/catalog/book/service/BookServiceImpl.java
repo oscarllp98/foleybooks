@@ -8,6 +8,8 @@ import com.foleybooks.catalog.book.repository.BookRepository;
 import com.foleybooks.catalog.book.repository.BookSpecifications;
 import com.foleybooks.catalog.common.PageEnvelope;
 import com.foleybooks.catalog.common.PageMeta;
+import java.util.Collection;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -51,7 +53,10 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>{@link #getBook(UUID)} is CA-09's detail read on the same collaborators:
  * one {@code findById}, the same mapper, and a {@link BookNotFoundException}
  * when the id resolves to no row — the service's own 404, never a controller
- * null-check (C8).
+ * null-check (C8). {@link #getBooks(java.util.Collection)} is CA-11's batch read
+ * (D-10) beside it: one {@code findAllById}, the same mapper, and the opposite
+ * not-found rule — an unknown id is absent from the array, the LC-14 signal the
+ * cart enrichment is built to read, never a 404 that would fail the whole batch.
  */
 @Service
 public class BookServiceImpl implements BookService {
@@ -103,6 +108,36 @@ public class BookServiceImpl implements BookService {
         return bookRepository.findById(id)
                 .map(bookMapper::toResponse)
                 .orElseThrow(() -> BookNotFoundException.forId(id));
+    }
+
+    /**
+     * CA-11's batch read (D-10, FR-11 enrichment). One {@code findAllById} — a
+     * single {@code WHERE id IN (...)} round-trip, which is the whole point of
+     * D-10: the cart's enrichment must be one east-west call, not one {@code
+     * findById} per line. The projection goes through the same {@link
+     * BookMapper#toResponseList} the list uses (ADR-009), <em>inside</em> this
+     * read-only transaction because {@code category} is lazy and {@code
+     * open-in-view} is off — the identical reason {@link #getBook(UUID)} maps in
+     * transaction, and the reason a batch line can never drift from a detail line.
+     *
+     * <p>Unknown ids simply do not appear (the {@code IN} query returns only the
+     * rows that exist); that absent-line is the LC-14 signal the caller reads,
+     * never a thrown 404 (see {@link BookService#getBooks}). A {@code null} or
+     * empty request short-circuits before the repository: {@code findAllById} over
+     * an empty collection is not a query Spring Data guarantees. Both empty shapes
+     * are HTTP-reachable — an absent {@code ?ids=} binds to {@code null} and a
+     * blank one to an empty list — so FR-11's empty cart answers {@code []} without
+     * touching the database either way; a non-blank malformed id never gets here
+     * (it is a boundary 400). No sort is applied because none is contractual for a
+     * keyed batch lookup — the caller maps the result by {@code id}.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public List<BookResponse> getBooks(Collection<UUID> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        return bookMapper.toResponseList(bookRepository.findAllById(ids));
     }
 
     /**

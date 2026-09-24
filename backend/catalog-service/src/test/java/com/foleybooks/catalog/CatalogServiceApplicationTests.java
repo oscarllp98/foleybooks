@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -96,5 +97,34 @@ class CatalogServiceApplicationTests {
                 .satisfies(contentType -> assertThat(contentType.isCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
                         .isTrue());
         assertThat(response.getBody()).contains("urn:foley-books:problem:book-not-found");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void bookBatch_whenRequestedForSeedAndUnknownIds_returnsPresentSubsetOnAPublicRead() {
+        // CA-11/D-10 through the whole stack, which no slice reaches: the batch is
+        // anonymous (C22), a bare JSON array (plan §2, not a page envelope), and —
+        // because open-in-view is off and category is lazy — only a live request
+        // proves the enrichment projection resolves the category inside the
+        // read-only transaction (the same failure that would 500 the detail read).
+        // A vanished id is simply absent, not a 404 (LC-14): this is the exact
+        // contract the order-service's cart read keys its enrichment on.
+        UUID cleanCodeId = UUID.fromString("00000000-0000-0000-0000-00000000cb06");
+        UUID gatsbyId = UUID.fromString("00000000-0000-0000-0000-00000000cb03");
+        UUID vanishedId = UUID.fromString("00000000-0000-0000-0000-00000000cb99");
+
+        var response = restTemplate.exchange(
+                "/api/v1/books/batch?ids=" + cleanCodeId + "&ids=" + gatsbyId + "&ids=" + vanishedId,
+                HttpMethod.GET, null, java.util.List.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isNotNull();
+        java.util.List<java.util.Map<String, Object>> books = response.getBody();
+        assertThat(books).hasSize(2);
+        assertThat(books).extracting(book -> book.get("id").toString())
+                .containsExactlyInAnyOrder(cleanCodeId.toString(), gatsbyId.toString());
+        // The embedded category is fully materialized, not a lazy-init 500.
+        assertThat(books).allSatisfy(book ->
+                assertThat(((java.util.Map<String, Object>) book.get("category")).get("name")).isNotNull());
     }
 }

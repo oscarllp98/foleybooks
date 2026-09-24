@@ -66,6 +66,16 @@ import org.springframework.test.web.servlet.MockMvc;
  * rendered by the real advice when the service reports no such book, and a
  * malformed id rejected by the binder before the service is touched — the path
  * variable version of the page/size/sort/categoryId asymmetry above.
+ *
+ * <p>CA-11's {@code GET /books/batch?ids=} (D-10, FR-11) gets the identical
+ * binder treatment on a query parameter — a malformed id is the shared 400 (field
+ * {@code ids}), an oversized list is a {@code @Size} 400 — but the opposite
+ * not-found rule (LC-14): a well-formed id naming no book yields a 200 with the
+ * present subset, never a 404, so the controller's only job is to hand the parsed
+ * ids to the service and serve the bare {@code [BookResponse]} array back. The
+ * anonymous 200 also proves the literal {@code /batch} segment resolves before
+ * the {@code /{id}} variable, and that the route is public on the GET allowlist
+ * (C22, C25).
  */
 @WebMvcTest(BookController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class, BookSortConverter.class})
@@ -446,6 +456,153 @@ class BookControllerTest {
                 .andExpect(jsonPath("$.status").value(400))
                 .andExpect(jsonPath("$.errors[0].field").value("id"))
                 .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    // ------------------------------------------------------------------ CA-11: GET /books/batch (D-10, FR-11)
+
+    @Test
+    void getBooks_whenRequestedAnonymously_responds200WithABareBookResponseArray() throws Exception {
+        // Plan §2 publishes the batch as a top-level [BookResponse] (no pagination
+        // envelope — it is a keyed lookup, not a browsed page), and the anonymous
+        // 200 is the public-allowlist proof for this path (C22, GET /api/v1/books/**)
+        // with the real SecurityConfig running in-slice (C25). Reaching /books/batch
+        // here and getting 200 rather than a 400 on id="batch" is also the proof
+        // that Spring resolves the literal segment before the {id} variable, so the
+        // batch handler — not the detail handler — serves the route.
+        when(bookService.getBooks(List.of(CLEAN_CODE_ID))).thenReturn(List.of(CLEAN_CODE));
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", CLEAN_CODE_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(1))
+                // The ADR-009 shape, identical to the list/detail record, so an
+                // enriched cart line cannot disagree with the catalog card: the
+                // derived badge, the exact EUR number (D-08) and the embedded
+                // category all travel through.
+                .andExpect(jsonPath("$[0].id").value(CLEAN_CODE_ID.toString()))
+                .andExpect(jsonPath("$[0].title").value("Clean Code"))
+                .andExpect(jsonPath("$[0].price").value(31.99))
+                .andExpect(jsonPath("$[0].availability").value("IN_STOCK"))
+                .andExpect(jsonPath("$[0].stockQuantity").value(12))
+                .andExpect(jsonPath("$[0].category.name").value("Technology"));
+
+        verify(bookService).getBooks(List.of(CLEAN_CODE_ID));
+    }
+
+    @Test
+    void getBooks_whenIdsGivenAsRepeatedParams_forwardsEveryParsedUuid() throws Exception {
+        // The east-west call D-10 designs for arrives as repeated ?ids=…&ids=…
+        // (how the order-service's Feign client serializes a collection); Spring
+        // binds each value through its own String -> UUID conversion, so a legal
+        // multi-id request reaches the service as a fully parsed list, in order.
+        when(bookService.getBooks(List.of(CLEAN_CODE_ID, TECHNOLOGY_ID))).thenReturn(List.of(CLEAN_CODE));
+
+        mockMvc.perform(get("/api/v1/books/batch")
+                        .param("ids", CLEAN_CODE_ID.toString())
+                        .param("ids", TECHNOLOGY_ID.toString()))
+                .andExpect(status().isOk());
+
+        verify(bookService).getBooks(List.of(CLEAN_CODE_ID, TECHNOLOGY_ID));
+    }
+
+    @Test
+    void getBooks_whenAnIdMatchesNoBook_responds200WithThePresentSubsetNotA404() throws Exception {
+        // CA-11's contract inverted against getBook's 404 (LC-14): a well-formed
+        // id that names no book is an absent array entry, and the caller reads the
+        // gap. The controller contributes no 404 path here — it delegates and
+        // serves whatever the batch returned — which is what keeps a single dead
+        // cart line from failing the whole enrichment read.
+        when(bookService.getBooks(List.of(UNKNOWN_ID))).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", UNKNOWN_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(List.of(UNKNOWN_ID));
+    }
+
+    @Test
+    void getBooks_whenNoIdsGiven_responds200WithAnEmptyArray() throws Exception {
+        // FR-11's empty cart: an ABSENT ids parameter is a valid empty lookup, never
+        // a 400 "ids is required". required=false binds it to null and the service
+        // answers [] — asserted by delegating, the boundary itself adds no rule (C8).
+        // Note this is the *absent* case only; a *present-but-blank* ?ids= is a
+        // malformed value (next test), the two are deliberately not conflated.
+        when(bookService.getBooks(null)).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(null);
+    }
+
+    @Test
+    void getBooks_whenIdsAreBlank_responds200WithAnEmptyArray() throws Exception {
+        // A present-but-blank ?ids= is NOT the same as a malformed id. Spring's
+        // RequestParamMethodArgumentResolver collapses a single value String[] to a
+        // String, and the String -> List<UUID> conversion goes through
+        // StringToCollectionConverter, whose comma-split drops the empty token — so
+        // ?ids= binds to an EMPTY list (getBooks([])), not a [""] that would fail
+        // UUID parsing. Distinct from an ABSENT ?ids= (null, prior test) and from a
+        // non-blank unparseable id (a real TypeMismatch 400, later). The service
+        // short-circuit answers [] for the empty list, so both no-ids shapes are an
+        // empty 200 (FR-11's empty cart), never a 400 "ids is required".
+        when(bookService.getBooks(List.of())).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", ""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(List.of());
+    }
+
+    @ParameterizedTest(name = "batchIds_malformed_rejected: ids={0} is a 400 validation error (LC-28)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "00000000-0000-0000-0000-00000000cb0z"})
+    void batchIds_malformed_rejectedWith400Validation(String rawIds) throws Exception {
+        // The same String -> UUID binder that 400s a malformed path id, applied to
+        // a batch element (C23, LC-28): an unparseable id never reaches the
+        // service — the shared advice renders the 400 with field "ids". This is
+        // deliberately distinct from a well-formed id that names no book, which is
+        // an absent entry and a 200 (test above), not a rejection.
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", rawIds))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("ids"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/batch"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @Test
+    void getBooks_whenTooManyIdsRequested_rejectedWith400Validation() throws Exception {
+        // LC-28's "extremely long query strings" bound for the batch, capped at the
+        // same MAX_SIZE ceiling that bounds a page so one enrichment read never
+        // outgrows a browsed page (NFR-02). A list one over the cap is refused at
+        // the boundary before the catalog is touched — distinct from a clamped
+        // page/size, because there is no "clamp" semantics for which specific books
+        // a cart asked for, so an oversized batch is a caller bug, not a browse.
+        String ids = String.join(",", java.util.Collections.nCopies(BookService.MAX_SIZE + 1,
+                CLEAN_CODE_ID.toString()));
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", ids))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("ids"))
+                .andExpect(jsonPath("$.errors[0].message").value("must request at most 100 ids"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/batch"))
                 .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
 
         verifyNoInteractions(bookService);

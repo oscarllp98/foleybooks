@@ -73,6 +73,15 @@ import org.springframework.test.util.ReflectionTestUtils;
  * {@code BookControllerTest}, and the lazy-category resolution the in-transaction
  * projection guarantees is proven against real PostgreSQL by
  * {@code CatalogServiceApplicationTests}.
+ *
+ * <p>CA-11's batch read (D-10, FR-11) is the same seam with the 404 rule
+ * inverted: one {@code findAllById}, the same shipped mapper so a batch line and
+ * a detail line cannot drift (ADR-009), and — proved by the mocked repository
+ * returning a subset — an id with no row is simply absent, never a thrown error,
+ * which is the LC-14 signal the cart enrichment consumes. The empty/null request
+ * short-circuits before the repository at all (FR-11's empty cart). The real
+ * {@code IN}-query subset semantics are the PostgreSQL case in
+ * {@code BookRepositoryTest}.
  */
 class BookServiceImplTest {
 
@@ -354,5 +363,73 @@ class BookServiceImplTest {
                         "Book not found", "No book exists with the given id.");
         assertThat(thrown.getProperties()).containsEntry("bookId", missingId.toString());
         verify(repository, never()).findAll(any(Specification.class), any(Pageable.class));
+    }
+
+    // ------------------------------------------------------------------ CA-11: batch (D-10, FR-11 enrichment)
+
+    @Test
+    void getBooks_whenIdsGiven_issuesOneFindAllByIdAndProjectsEveryRow() {
+        // D-10's single-call rule at the repository seam (NFR-02 on the cart path):
+        // the batch is exactly one findAllById, and every returned row goes
+        // through the shipped BookMapperImpl (ADR-009) — so the badge, the exact
+        // price and the embedded category a batch line carries are byte-for-byte
+        // what the detail read would produce for the same row. A projection
+        // hand-built here instead of through the mapper could silently drift from
+        // the card beside it; using the real generated mapper is what proves it
+        // cannot (C8, ADR-009).
+        when(repository.findAllById(any())).thenReturn(List.of(cleanCode()));
+
+        List<BookResponse> result = service.getBooks(List.of(CLEAN_CODE_ID));
+
+        assertThat(result).singleElement().isEqualTo(new BookResponse(CLEAN_CODE_ID, "Clean Code",
+                "Robert C. Martin", "9780132350884", new BigDecimal("31.99"),
+                "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg",
+                Availability.IN_STOCK, 12, new CategoryResponse(TECHNOLOGY_ID, "Technology")));
+        ArgumentCaptor<Iterable<UUID>> captor = ArgumentCaptor.captor();
+        verify(repository).findAllById(captor.capture());
+        assertThat(captor.getValue()).containsExactly(CLEAN_CODE_ID);
+        verify(repository, never()).findById(any());
+    }
+
+    @Test
+    void getBooks_whenSomeIdsMatchNoBook_omitsThemWithoutThrowing() {
+        // CA-11's deliberate inversion of getBook's 404 (LC-14): a requested id
+        // with no row simply is not in the result the repository hands back, and
+        // the service neither adds a placeholder nor throws — the cart reads the
+        // absent entry as "this line's book vanished". Proven against the mocked
+        // repo returning a subset; the real IN-query subset semantics are the
+        // PostgreSQL case in BookRepositoryTest.
+        UUID vanished = UUID.fromString("00000000-0000-0000-0000-00000000cb99");
+        when(repository.findAllById(any())).thenReturn(List.of(cleanCode()));
+
+        List<BookResponse> result = service.getBooks(List.of(CLEAN_CODE_ID, vanished));
+
+        assertThat(result).extracting(BookResponse::id).containsExactly(CLEAN_CODE_ID);
+        assertThat(result).noneMatch(book -> book.id().equals(vanished));
+    }
+
+    @Test
+    void getBooks_whenIdsEmpty_returnsEmptyResultWithoutTouchingTheRepository() {
+        // A blank ?ids= binds to an EMPTY list, so this is the HTTP-reachable empty
+        // path (FR-11's empty cart): an empty array, never an error, and never a
+        // database round-trip — findAllById over an empty collection is a query
+        // Spring Data does not define, so the short-circuit avoids it. The web slice
+        // proves the binder hands the endpoint exactly this empty list.
+        List<BookResponse> result = service.getBooks(List.of());
+
+        assertThat(result).isEmpty();
+        verify(repository, never()).findAllById(any());
+    }
+
+    @Test
+    void getBooks_whenIdsNull_returnsEmptyResultWithoutTouchingTheRepository() {
+        // The other empty shape: an ABSENT ?ids= binds to null. Same no-query,
+        // empty-array rule as the blank case above — both are HTTP-reachable, both
+        // never a 400 "ids is required", proven once at the service and once at the
+        // boundary (BookControllerTest) so neither layer re-decides.
+        List<BookResponse> result = service.getBooks(null);
+
+        assertThat(result).isEmpty();
+        verify(repository, never()).findAllById(any());
     }
 }

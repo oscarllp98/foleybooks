@@ -13,8 +13,10 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
  * CA-08's search/category filter (D-06) composes through
  * {@link JpaSpecificationExecutor} over {@link BookSpecifications} rather than
  * a declared finder, because its two criteria are independently optional and
- * must combine as {@code AND}; the {@code /books/batch} lookup (D-10) arrives
- * with CA-11.
+ * must combine as {@code AND}; CA-11's batch lookup (D-10) ships on the
+ * inherited {@code findAllById} — a single {@code WHERE id IN (...)} that
+ * returns only the rows present, which is exactly the absent-id semantics the
+ * cart enrichment needs (LC-14), so it wants no custom finder either.
  */
 public interface BookRepository extends JpaRepository<Book, UUID>, JpaSpecificationExecutor<Book> {
 }

@@ -6,6 +6,7 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Size;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -66,9 +67,27 @@ import org.springframework.web.bind.annotation.RestController;
  * legitimate nothing-to-show state (FR-06, LC-31) while a detail page for an id
  * the client was handed has none, so {@link com.foleybooks.catalog.book.service.BookService#getBook}
  * answers it and the shared advice renders {@code urn:foley-books:problem:book-not-found}.
- * The controller contributes no rule of its own (C8) — no id is ever a "not
- * found" by its shape, and no book list is consulted here to decide.
- */
+  * The controller contributes no rule of its own (C8) — no id is ever a "not
+  * found" by its shape, and no book list is consulted here to decide.
+  *
+  * <p>{@code GET /books/batch?ids=} (CA-11, D-10) is the collection half of the
+  * same public read model, reached before the {@code /{id}} handler because
+  * Spring's literal path segment wins over the {@code {id}} variable — so
+  * {@code /books/batch} never falls into {@link #getBook} and 400 on a
+  * non-UUID "id". Its boundary contract mirrors {@code /books/{id}}'s exactly:
+  * the {@code String -> UUID} binder rejects a malformed id with the shared 400
+  * validation ProblemDetail (field {@code ids}) rather than a 404 (LC-28, C23,
+  * D-07's path-variable reading), and a {@code @Size} cap equal to
+  * {@code MAX_SIZE} refuses an oversized id list at the boundary as the very
+  * same 400 the over-long {@code search} earns (LC-28's "extremely long query
+  * strings" clause) — bounding the {@code IN} list to one page's worth is both
+  * NFR-02 on the hottest cart-path read and one fewer unbounded query. What the
+   * binder cannot reject — a well-formed id naming no book, a duplicate id, an
+   * absent or blank {@code ids} — is not a boundary decision at all but the
+   * service's absent-entry batch semantics (LC-14, and an empty {@code []} for no
+   * ids at all), so nothing here inspects the ids the way {@code getBook} inspects
+   * nothing (C8).
+  */
 @RestController
 @RequestMapping("/api/v1/books")
 @Tag(name = "Catalog", description = "Browse, search and inspect the book catalog and its categories "
@@ -129,6 +148,25 @@ public class BookController {
                     example = "00000000-0000-0000-0000-00000000cb06")
             @PathVariable(name = "id") UUID id) {
         return ResponseEntity.ok(bookService.getBook(id));
+    }
+
+    @GetMapping("/batch")
+    @Operation(summary = "Get books in batch by ids",
+            description = "One catalog read for many ids — the single call the order-service uses to enrich a "
+                    + "cart (D-10, FR-11). Answers a bare JSON array of the same BookResponse shape the list and "
+                    + "detail serve, with one entry per id that exists. An id that names no book is simply "
+                    + "absent from the array, never a 404: the missing entry is how the cart flags a line whose "
+                    + "book vanished (LC-14). Duplicated ids collapse to one entry each. An absent or blank "
+                    + "?ids= is an empty array, never an error; a non-UUID id — or more than "
+                    + BookService.MAX_SIZE + " ids — is a validation error answered before the catalog is read.")
+    public ResponseEntity<List<BookResponse>> getBooks(
+            @Parameter(description = "Book ids to fetch, repeated as ?ids=…&ids=… or comma-separated. Order is "
+                    + "not significant and unknown ids are omitted. A malformed value is a 400, not a 404.",
+                    example = "00000000-0000-0000-0000-00000000cb06")
+            @RequestParam(name = "ids", required = false)
+            @Size(max = BookService.MAX_SIZE, message = "must request at most " + BookService.MAX_SIZE + " ids")
+            List<UUID> ids) {
+        return ResponseEntity.ok(bookService.getBooks(ids));
     }
 
     /**
