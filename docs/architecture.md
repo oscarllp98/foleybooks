@@ -91,7 +91,7 @@ flowchart TB
 ### Key constraints reflected above
 
 - **Database-per-service**: no shared schemas, no cross-service FKs; cart stores
-  `book_id` values only and enriches via Feign (C18, ADR-005).
+  `book_id` values only (ADR-004) and enriches via Feign (C18, ADR-005).
 - **Stateless services**: session state lives in JWTs / the DB — no `HttpSession`.
 - **Security**: JWT RS256 issued by auth-service; every other service validates via
   `spring.security.oauth2.resourceserver.jwt` against the JWKS URI
@@ -162,9 +162,9 @@ sequenceDiagram
 ## 5. Where to read next
 
 - [`docs/adr/`](adr/) — decision records (mail sending: ADR-001; auth schema:
-  ADR-002; catalog schema: ADR-003; Eureka security: ADR-006; public auth
-  allowlist + security errors: ADR-007; resource-server JWT validation +
-  roles mapping: ADR-008; more land with each spec phase)
+  ADR-002; catalog schema: ADR-003; cart schema: ADR-004; Eureka security:
+  ADR-006; public auth allowlist + security errors: ADR-007; resource-server JWT
+  validation + roles mapping: ADR-008; more land with each spec phase)
 - Module structure, endpoint map and technical decisions (D-01..D-15) are defined in
   the Spec 001 plan; product requirements live in the spec — both are maintained
   outside the public repository.

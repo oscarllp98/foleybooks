@@ -101,8 +101,8 @@ The confirmation link itself is built per D-01 from `FRONTEND_BASE_URL`
   placeholders are added when a credentialed provider is actually configured, keeping
   the file in sync with reality (AGENTS.md §12).
 - FR-01/FR-02 acceptance is now reviewable in docs before AU-08 writes code; the
-  plan §7.4 finish criterion "ADR-001…ADR-005 exist" is one step closer (ADR-003/
-  004/005 land with CA-01/OR-01/OR-02).
+  plan §7.4 finish criterion "ADR-001…ADR-005 exist" is one step closer (ADR-003
+  and ADR-004 landed with CA-01/OR-01; ADR-005 lands with OR-02).
 
 ## Deviations
 

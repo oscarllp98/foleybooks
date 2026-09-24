@@ -6,8 +6,9 @@ Accepted — documents the mapping pattern delivered by CA-05 (spec 001, Phase 2
 resolves two questions AGENTS.md §3/§6 and the plan leave open: where a derived
 response field is computed, and which read-model conventions every later mapper
 must follow. Binding for CA-06..CA-11 (catalog reads and `GET /books/batch`) and
-for OR-05 (the Feign DTOs that consume them). ADR-004 and ADR-005 remain reserved
-by plan §5 for the cart schema and the batch-enrichment decision.
+for OR-05 (the Feign DTOs that consume them). ADR-004 (cart schema) has since
+landed with OR-01; ADR-005 remains reserved by plan §5 for the batch-enrichment
+decision.
 
 ## Context
 
