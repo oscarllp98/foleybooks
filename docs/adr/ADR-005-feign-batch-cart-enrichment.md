@@ -151,6 +151,9 @@ the transport boundary instead of letting raw exceptions into the service:
 > dependency URN being the accurate default; a generic `500` is acceptable) is an
 > OR-03 handler detail, adjustable without an ADR change — the spec names no
 > catalog-outage UX, and NFR-06 only guarantees a generic body with a `traceId`.
+> Delivered by OR-03 as `503` / `urn:foley-books:problem:catalog-unavailable`
+> (order-service `GlobalExceptionHandler`, pinned by its unit and MockMvc tests):
+> the upstream status is logged, the upstream body never leaves the service.
 > No fallback / stale-serving / degraded-render is built (C1): the MVP catalog
 > is always-on (spec §6), so this path exists to be correct under test, not to be
 > exercised in the demo.

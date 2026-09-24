@@ -50,8 +50,8 @@ jobs:
       - run: npm run build
 
   # Per AGENTS.md §11: build each backend module's image and publish to GHCR.
-  # Modules without a Dockerfile yet (auth/catalog/order arrive in phases 1-3)
-  # are skipped by the gate below and picked up automatically once scaffolded.
+  # All five modules are scaffolded as of OR-03; the gate below still detects
+  # the Dockerfile per module and skips any that is missing.
   docker:
     name: Images → GHCR (${{ matrix.module }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

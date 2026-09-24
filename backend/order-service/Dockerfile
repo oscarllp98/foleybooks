@@ -1,18 +1,18 @@
-# Build context is backend/ (the parent POM is required): docker build -f api-gateway/Dockerfile .
+# Build context is backend/ (the parent POM is required): docker build -f order-service/Dockerfile .
 FROM maven:3.9-eclipse-temurin-21 AS builder
 WORKDIR /workspace
 COPY pom.xml ./
 # Sibling POMs: the parent aggregator lists every module, so the reactor needs them
-# to resolve -pl api-gateway -am; their sources are not copied or built.
+# to resolve -pl order-service -am; their sources are not copied or built.
 COPY discovery-service/pom.xml ./discovery-service/
 COPY api-gateway/pom.xml ./api-gateway/
 COPY auth-service/pom.xml ./auth-service/
 COPY catalog-service/pom.xml ./catalog-service/
 COPY order-service/pom.xml ./order-service/
-RUN mvn -B -pl api-gateway -am dependency:go-offline
-COPY api-gateway/src ./api-gateway/src
-RUN mvn -B -pl api-gateway -am package -DskipTests \
-    && mv api-gateway/target/api-gateway-*.jar /workspace/app.jar
+RUN mvn -B -pl order-service -am dependency:go-offline
+COPY order-service/src ./order-service/src
+RUN mvn -B -pl order-service -am package -DskipTests \
+    && mv order-service/target/order-service-*.jar /workspace/app.jar
 
 FROM eclipse-temurin:21-jre AS extract
 WORKDIR /app
@@ -31,5 +31,5 @@ COPY --from=extract --chown=spring:spring /app/spring-boot-loader/ ./
 COPY --from=extract --chown=spring:spring /app/snapshot-dependencies/ ./
 COPY --from=extract --chown=spring:spring /app/application/ ./
 USER spring
-EXPOSE 8080
+EXPOSE 8083
 ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]

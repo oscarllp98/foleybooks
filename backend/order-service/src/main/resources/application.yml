@@ -1,0 +1,87 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: order-service
+  profiles:
+    # Local runs default to dev; containers set SPRING_PROFILES_ACTIVE=docker.
+    default: dev
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # AGENTS.md §5: tokens are issued by auth-service and validated here via JWKS.
+          # Host-run dev reaches auth on localhost:8081; the docker profile below and
+          # the JWKS_URI env var (compose) switch to the network DNS name.
+          jwk-set-uri: ${JWKS_URI:http://localhost:8081/oauth2/jwks}
+
+eureka:
+  client:
+    service-url:
+      # Registry credentials embedded per ADR-006; no committed defaults.
+      defaultZone: http://${EUREKA_USERNAME}:${EUREKA_PASSWORD}@${EUREKA_HOSTNAME:localhost}:8761/eureka/
+
+logging:
+  pattern:
+    # MDC traceId set by TraceIdFilter — the same id every ProblemDetail carries (NFR-06, D-15).
+    level: "%5p [${spring.application.name:},%X{traceId:-}]"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+
+# Swagger UI is a dev-profile-only surface (AGENTS.md §6).
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    # Host-run dev: expects the database env trio from .env (C19 — no committed password).
+    url: jdbc:postgresql://localhost:5434/${ORDER_DB_NAME:order_db}
+    username: ${ORDER_DB_USER:order_user}
+    password: ${ORDER_DB_PASSWORD}
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  datasource:
+    # docker-compose overrides the full SPRING_DATASOURCE_* trio; these are the
+    # compose-network fallbacks (order-db answers on :5432 inside the network, C27).
+    # No committed password (C19): startup fails fast when the env is missing.
+    url: jdbc:postgresql://order-db:5432/${ORDER_DB_NAME:order_db}
+    username: ${ORDER_DB_USER:order_user}
+    password: ${ORDER_DB_PASSWORD}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Inside the compose network auth-service answers as auth-service:8081 (C27);
+          # docker-compose also forwards a JWKS_URI override (.env.example "JWT").
+          jwk-set-uri: ${JWKS_URI:http://auth-service:8081/oauth2/jwks}
