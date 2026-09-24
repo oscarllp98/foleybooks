@@ -162,9 +162,11 @@ sequenceDiagram
 ## 5. Where to read next
 
 - [`docs/adr/`](adr/) — decision records (mail sending: ADR-001; auth schema:
-  ADR-002; catalog schema: ADR-003; cart schema: ADR-004; Eureka security:
-  ADR-006; public auth allowlist + security errors: ADR-007; resource-server JWT
-  validation + roles mapping: ADR-008; more land with each spec phase)
+  ADR-002; catalog schema: ADR-003; cart schema: ADR-004; Feign batch + cart
+  enrichment: ADR-005; Eureka security: ADR-006; public auth allowlist +
+  security errors: ADR-007; resource-server JWT validation + roles mapping:
+  ADR-008; catalog read-model mapping + book shape: ADR-009; more land with each
+  spec phase)
 - Module structure, endpoint map and technical decisions (D-01..D-15) are defined in
   the Spec 001 plan; product requirements live in the spec — both are maintained
   outside the public repository.
