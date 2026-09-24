@@ -3,7 +3,9 @@ package com.foleybooks.order.config;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.foleybooks.order.cart.client.CatalogErrorDecoder;
 import feign.codec.Decoder;
+import feign.codec.ErrorDecoder;
 import feign.optionals.OptionalDecoder;
 import org.springframework.beans.factory.ObjectFactory;
 import org.springframework.boot.autoconfigure.http.HttpMessageConverters;
@@ -15,8 +17,8 @@ import org.springframework.http.converter.json.MappingJackson2HttpMessageConvert
 
 /**
  * Feign plumbing for the east-west catalog hop (AGENTS.md §4, ADR-005). The client
- * interface itself arrives with OR-05; this class owns what ADR-005 assigns to
- * {@code config/FeignConfig}: the transport codecs.
+ * interface is {@code cart/client/CatalogClient} (OR-05); this class owns what ADR-005
+ * assigns to {@code config/FeignConfig}: the transport codecs.
  *
  * <p>The decoder is Jackson configured with {@code FAIL_ON_UNKNOWN_PROPERTIES = false}
  * so catalog-service stays free to grow its published {@code BookResponse} (ADR-009):
@@ -24,12 +26,19 @@ import org.springframework.http.converter.json.MappingJackson2HttpMessageConvert
  * never break cart reads. The consumed shape is re-declared consumer-side because
  * AGENTS.md §4 forbids a shared library module.
  *
+ * <p>The {@link ErrorDecoder} is the transport half of ADR-005's
+ * "absence is data; unavailability is an error": catalog's specific
+ * {@code book-not-found} 404 becomes the domain {@code BookNotFoundException},
+ * every other failure — other 404s included — stays a {@code FeignException}
+ * for {@code GlobalExceptionHandler} to render as 503 {@code catalog-unavailable}
+ * — never a fabricated unavailable-cart-line. ADR-005 assigns the bean to this
+ * class; its implementation is {@code cart/client/CatalogErrorDecoder}, the
+ * transport half of the client adapter it decodes for.
+ *
  * <p>No {@code Authorization} relay interceptor exists and none is added speculatively
  * (ADR-005, C1): catalog GETs are anonymous (C22), and the caller's token is validated
  * once at this service's own security boundary (ADR-008) — identity never crosses into
- * catalog. The 404-to-domain-exception {@code ErrorDecoder} is part of OR-05's client
- * work; catalog transport failures that are not decoded here are rendered as
- * ProblemDetail by {@code GlobalExceptionHandler}.
+ * catalog.
  */
 @Configuration
 public class FeignConfig {
@@ -42,5 +51,10 @@ public class FeignConfig {
         ObjectFactory<HttpMessageConverters> converters = () ->
                 new HttpMessageConverters(new MappingJackson2HttpMessageConverter(tolerantMapper));
         return new OptionalDecoder(new ResponseEntityDecoder(new SpringDecoder(converters)));
+    }
+
+    @Bean
+    ErrorDecoder catalogErrorDecoder() {
+        return new CatalogErrorDecoder();
     }
 }

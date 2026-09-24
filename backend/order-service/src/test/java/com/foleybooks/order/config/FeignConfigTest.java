@@ -1,12 +1,12 @@
 package com.foleybooks.order.config;
 
+import com.foleybooks.order.cart.client.BookDto;
 import feign.Request;
 import feign.Response;
 import feign.codec.Decoder;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
@@ -17,10 +17,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Pins the ADR-005 codec decision: catalog may add {@code BookResponse} fields at any
- * time (ADR-009), and the consumer-side subset must still decode — the client mapper is
- * configured FAIL_ON_UNKNOWN_PROPERTIES = false precisely for that. OR-05 will reuse
- * this decoder through {@code cart/client/CatalogClient}; until then the tolerance is
- * proven against a stand-in of the six-field subset the ADR names as the contract.
+ * time (ADR-009), and the consumer-side subset {@code cart/client/BookDto} must still
+ * decode — the client mapper is configured FAIL_ON_UNKNOWN_PROPERTIES = false precisely
+ * for that. OR-05's {@code CatalogClient} reuses this decoder through its return types;
+ * the six consumed fields are the contract and are asserted field by field.
  */
 class FeignConfigTest {
 
@@ -41,10 +41,13 @@ class FeignConfigTest {
                   "publisherOfTheFuture": "some field cart has never heard of" }
                 """;
 
-        BookSubset book = (BookSubset) decoder.decode(responseWithBody(wireBody), BookSubset.class);
+        BookDto book = (BookDto) decoder.decode(responseWithBody(wireBody), BookDto.class);
 
         assertThat(book).isNotNull();
         assertThat(book.id()).isEqualTo(UUID.fromString("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assertThat(book.title()).isEqualTo("Clean Code");
+        assertThat(book.author()).isEqualTo("Robert C. Martin");
+        assertThat(book.coverUrl()).isEqualTo("https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg");
         // Money stays BigDecimal across the hop — never widened to double (D-08, NFR-07).
         assertThat(book.price()).isEqualByComparingTo("31.99");
         assertThat(book.stockQuantity()).isEqualTo(12);
@@ -67,9 +70,5 @@ class FeignConfigTest {
     // SpringDecoder keys off that header, so the fixture has to carry it too.
     private static Map<String, Collection<String>> jsonHeaders() {
         return Map.of("Content-Type", List.of("application/json"));
-    }
-
-    /** The six-field consumer subset ADR-005 declares for {@code cart/client/BookDto} (OR-05). */
-    record BookSubset(UUID id, String title, String author, String coverUrl, BigDecimal price, int stockQuantity) {
     }
 }

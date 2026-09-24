@@ -2,11 +2,14 @@ package com.foleybooks.order;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.foleybooks.order.cart.client.CatalogClient;
+import com.foleybooks.order.cart.client.CatalogErrorDecoder;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -14,11 +17,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Scaffold boot proof (OR-03): the full context starts on a real PostgreSQL — datasource,
- * JPA validate, resource-server security, Feign and the Feign-aware advice all wire
- * together. Cart endpoints don't exist yet (OR-06..OR-10), so the LC-27 anonymous-cart 401
- * is asserted here through the live filter chain rather than via a controller. The empty
- * migration set is OR-04's to fill; {@code @DataJpaTest} then pins migration application.
+ * Scaffold boot proof (OR-03) kept current by OR-05: the full context starts on a real
+ * PostgreSQL — datasource, JPA validate, resource-server security, Feign and the
+ * Feign-aware advice all wire together — and {@code @EnableFeignClients} now picks up
+ * the real {@link CatalogClient} with its codec beans, without ever invoking it.
+ * Cart endpoints don't exist yet (OR-06..OR-10), so the LC-27 anonymous-cart 401
+ * is asserted here through the live filter chain rather than via a controller.
  */
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
@@ -36,8 +40,21 @@ class OrderServiceApplicationTests {
     @Autowired
     TestRestTemplate restTemplate;
 
+    @Autowired
+    ApplicationContext context;
+
     @Test
     void startup_whenPostgresAvailable_bootsSuccessfully() {
+    }
+
+    @Test
+    void catalogClient_whenContextStarts_isRegisteredWithItsCodecBeans() {
+        // OR-05: the scanned @FeignClient and the ADR-005 codecs are real beans; the
+        // east-west wiring exists before any CartService consumes it (bean creation
+        // resolves the Feign target — no catalog instance is ever called here).
+        assertThat(context.getBean(CatalogClient.class)).isNotNull();
+        assertThat(context.getBean(feign.codec.Decoder.class)).isNotNull();
+        assertThat(context.getBean(feign.codec.ErrorDecoder.class)).isInstanceOf(CatalogErrorDecoder.class);
     }
 
     @Test
