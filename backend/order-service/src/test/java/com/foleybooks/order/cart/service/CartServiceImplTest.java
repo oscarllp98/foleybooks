@@ -3,6 +3,7 @@ package com.foleybooks.order.cart.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -10,15 +11,26 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.foleybooks.order.cart.api.CartItemResponse;
+import com.foleybooks.order.cart.api.CartResponse;
 import com.foleybooks.order.cart.client.BookDto;
 import com.foleybooks.order.cart.client.CatalogClient;
 import com.foleybooks.order.cart.domain.Cart;
 import com.foleybooks.order.cart.domain.CartItem;
 import com.foleybooks.order.cart.repository.CartItemRepository;
 import com.foleybooks.order.cart.repository.CartRepository;
+import feign.FeignException;
+import feign.Request;
+import feign.Response;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -54,12 +66,28 @@ import org.springframework.transaction.support.TransactionOperations;
  * pinned by {@code CatalogErrorDecoderTest}) leaves the service untouched and
  * writes nothing. The {@link CartLine} return is the AGENTS.md §4 records-out
  * seam: no assertion here can reach an entity, because none escapes.
+ *
+ * <p>OR-07 adds the read half's plan §6.1 entries —
+ * {@code cart_read_unavailableBook_flagsLine} (LC-14) and
+ * {@code cart_read_insufficientStock_flagsLine} (LC-30) pin the two flags and
+ * that flagged lines are excluded from the total while an unreachable catalog
+ * stays a propagated transport failure, never a fabricated flag (ADR-005) —
+ * and {@code money_lineTotals_exact} (D-08, NFR-07), asserted through
+ * scale-sensitive {@link BigDecimal#equals} so an off-scale sum cannot pass
+ * even numerically. ADR-005's transaction posture — cart and lines loaded in
+ * one consistent unit that has committed before the Feign hop — is pinned with
+ * a self-tracking {@code TransactionOperations}, the same seam
+ * {@code UserServiceImplTest} uses for post-commit mail dispatch.
  */
 class CartServiceImplTest {
 
     private static final UUID OWNER = UUID.fromString("0b8f4b2e-9d3a-4c1e-8a2b-1f2e3d4c5b6a");
     private static final UUID BOOK_ID = UUID.fromString("3fa85f64-5717-4562-b3fc-2c963f66afa6");
     private static final UUID CART_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
+    private static final UUID BOOK_B = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private static final UUID BOOK_C = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final UUID BOOK_GONE = UUID.fromString("44444444-4444-4444-4444-444444444444");
+    private static final String COVER_URL = "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg";
 
     private final CatalogClient catalogClient = mock(CatalogClient.class);
     private final CartRepository cartRepository = mock(CartRepository.class);
@@ -79,9 +107,7 @@ class CartServiceImplTest {
 
     private void stubStock(int stock) {
         when(catalogClient.findBook(BOOK_ID)).thenReturn(new BookDto(
-                BOOK_ID, "Clean Code", "Robert C. Martin",
-                "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg",
-                new BigDecimal("31.99"), stock));
+                BOOK_ID, "Clean Code", "Robert C. Martin", COVER_URL, new BigDecimal("31.99"), stock));
     }
 
     /** JPA's contract: a save returns the managed instance it was given. */
@@ -97,7 +123,42 @@ class CartServiceImplTest {
     }
 
     private CartItem lineOf(Cart cart, int quantity) {
-        return new CartItem(cart, BOOK_ID, quantity);
+        return lineOf(cart, BOOK_ID, quantity);
+    }
+
+    private CartItem lineOf(Cart cart, UUID bookId, int quantity) {
+        return new CartItem(cart, bookId, quantity);
+    }
+
+    /** Deterministic ids for the > 100-line chunking fixture. */
+    private static UUID bookIdOf(int index) {
+        return new UUID(0L, index);
+    }
+
+    /** Wire up the local half of a read: the user's committed cart and its stored lines. */
+    private void stubCartWithLines(Cart cart, CartItem... lines) {
+        stubCartWithLines(cart, List.of(lines));
+    }
+
+    private void stubCartWithLines(Cart cart, List<CartItem> lines) {
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(lines);
+    }
+
+    private static BookDto bookDto(UUID id, String title, String price, int stock) {
+        return new BookDto(id, title, "Robert C. Martin", COVER_URL, new BigDecimal(price), stock);
+    }
+
+    /** The 503 a Feign call raises when catalog is down — the ErrorDecoder's residual output. */
+    private static FeignException catalogDown() {
+        Request request = Request.create(Request.HttpMethod.GET,
+                "http://catalog-service:8082/api/v1/books/batch", Map.of(), Request.Body.empty(), null);
+        Response response = Response.builder()
+                .status(503).reason("Service Unavailable").request(request)
+                .headers(Map.of("Content-Type", List.of("application/problem+json")))
+                .body("{ \"detail\": \"no healthy upstream\" }", StandardCharsets.UTF_8)
+                .build();
+        return FeignException.errorStatus("CatalogClient#batchBooks(Collection)", response);
     }
 
     private CartItem captureSavedLine() {
@@ -316,6 +377,249 @@ class CartServiceImplTest {
         CartItem summed = captureSavedLine();
         assertThat(summed.getQuantity()).isEqualTo(12);
         assertThat(result).isEqualTo(new CartLine(BOOK_ID, 12));
+    }
+
+    // ------------------------------------------------------ plan §6.1 / OR-07: the read (FR-11)
+
+    @Test
+    void read_whenUserHasNoCart_returnsEmptyCartWithoutCreatingOrCallingCatalog() {
+        // FR-11's empty state / ADR-004: add creates carts, read never
+        // materializes one — and no lines means no reason to touch the network.
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.empty());
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items()).isEmpty();
+        assertThat(result.total()).isEqualTo(new BigDecimal("0.00"));
+        assertThat(result.currency()).isEqualTo("EUR");
+        verifyNoInteractions(catalogClient, cartItemRepository);
+        verify(cartRepository, never()).save(any());
+        verify(cartRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void read_whenCartHasNoLines_returnsEmptyCartWithoutCallingCatalog() {
+        stubCartWithLines(existingCart());
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items()).isEmpty();
+        assertThat(result.total()).isEqualTo(new BigDecimal("0.00"));
+        assertThat(result.currency()).isEqualTo("EUR");
+        verifyNoInteractions(catalogClient);
+    }
+
+    @Test
+    void read_whenCartAndLinesLoad_theyShareOneTransactionAndTheBatchRunsAfterItCloses() {
+        // ADR-005 consequence ("the read is a two-source join... must run the
+        // Feign call outside the DB transaction"): cart + lines load in ONE
+        // committed snapshot, and batchBooks fires only after the unit has
+        // closed — no DB connection held across the east-west hop, no torn
+        // read if a concurrent add commits in between. A transaction that
+        // tracks its own open flag, the same seam UserServiceImplTest uses.
+        AtomicBoolean transactionOpen = new AtomicBoolean();
+        TransactionOperations trackingTransaction = new TransactionOperations() {
+            @Override
+            public <T> T execute(TransactionCallback<T> action) {
+                transactionOpen.set(true);
+                try {
+                    return action.doInTransaction(null);
+                } finally {
+                    transactionOpen.set(false);
+                }
+            }
+        };
+        CartServiceImpl trackingService = new CartServiceImpl(
+                catalogClient, cartRepository, cartItemRepository, trackingTransaction);
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenAnswer(invocation -> {
+            assertThat(transactionOpen).isTrue(); // cart load is inside the unit
+            return Optional.of(cart);
+        });
+        when(cartItemRepository.findByCartId(CART_ID)).thenAnswer(invocation -> {
+            assertThat(transactionOpen).isTrue(); // line load is inside the same unit
+            return List.of(lineOf(cart, 2));
+        });
+        when(catalogClient.batchBooks(anyCollection())).thenAnswer(invocation -> {
+            assertThat(transactionOpen).isFalse(); // the hop runs after the commit
+            return List.of(bookDto(BOOK_ID, "Clean Code", "31.99", 12));
+        });
+
+        CartResponse result = trackingService.read(OWNER);
+
+        assertThat(result.total()).isEqualTo(new BigDecimal("63.98"));
+    }
+
+    @Test
+    void read_whenSingleSufficientLine_answersThePlanSectionTwoContract() {
+        // The plan §2 cart JSON, field for field and to exactness: Clean Code
+        // 31.99 × 2 → lineTotal 63.98, total 63.98, currency EUR. BigDecimal
+        // equals is scale-sensitive, so this pins D-08's scale-2 shape too.
+        Cart cart = existingCart();
+        stubCartWithLines(cart, lineOf(cart, 2));
+        when(catalogClient.batchBooks(List.of(BOOK_ID))).thenReturn(List.of(bookDto(
+                BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result).isEqualTo(new CartResponse(
+                List.of(new CartItemResponse(BOOK_ID, "Clean Code", "Robert C. Martin", COVER_URL,
+                        new BigDecimal("31.99"), 2, new BigDecimal("63.98"), 12, true, false)),
+                new BigDecimal("63.98"), "EUR"));
+    }
+
+    @Test
+    void cart_read_unavailableBook_flagsLine() {
+        // LC-14, ADR-005: the batch's absent entry is the whole signal. The
+        // line keeps only its stored intent (bookId + quantity) and the flag —
+        // every catalog-sourced field stays null, never a made-up 0.00 price
+        // or invented stock — and it contributes nothing to the total.
+        Cart cart = existingCart();
+        stubCartWithLines(cart, lineOf(cart, BOOK_ID, 2), lineOf(cart, BOOK_GONE, 3));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items().get(1)).isEqualTo(new CartItemResponse(
+                BOOK_GONE, null, null, null, null, 3, null, null, false, false));
+        assertThat(result.items().get(0).available()).isTrue();
+        assertThat(result.total()).isEqualTo(new BigDecimal("63.98"));
+    }
+
+    @Test
+    void cart_read_insufficientStock_flagsLine() {
+        // LC-30: the book exists but stock fell under the stored quantity. The
+        // line stays fully populated — the user needs the real price and the
+        // real bound to act on it — while the grand total excludes it (D-10).
+        Cart cart = existingCart();
+        stubCartWithLines(cart,
+                lineOf(cart, BOOK_ID, 2),
+                lineOf(cart, BOOK_B, 5));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12),
+                bookDto(BOOK_B, "Design Patterns", "12.50", 3)));
+
+        CartResponse result = service.read(OWNER);
+
+        CartItemResponse flagged = result.items().get(1);
+        assertThat(flagged).isEqualTo(new CartItemResponse(BOOK_B, "Design Patterns", "Robert C. Martin",
+                COVER_URL, new BigDecimal("12.50"), 5, new BigDecimal("62.50"), 3, true, true));
+        // Only the unflagged line counts toward the total: 63.98, never 126.48.
+        assertThat(result.total()).isEqualTo(new BigDecimal("63.98"));
+    }
+
+    @Test
+    void read_whenQuantityEqualsStock_doesNotFlagTheLine() {
+        // LC-30's boundary: insufficient is strictly quantity > stock —
+        // ordering exactly the last copies is fulfillable, not a shortage.
+        Cart cart = existingCart();
+        stubCartWithLines(cart, lineOf(cart, 12));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items().get(0).insufficientStock()).isFalse();
+        assertThat(result.total()).isEqualTo(new BigDecimal("383.88"));
+    }
+
+    @Test
+    void money_lineTotals_exact() {
+        // D-08/NFR-07: an integer multiplier adds no decimal places to a
+        // scale-2 price, so every product and the sum are exact — asserted
+        // through scale-sensitive BigDecimal.equals, with no rounding step
+        // anywhere in the chain.
+        Cart cart = existingCart();
+        stubCartWithLines(cart,
+                lineOf(cart, BOOK_ID, 2),
+                lineOf(cart, BOOK_B, 3),
+                lineOf(cart, BOOK_C, 7));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12),
+                bookDto(BOOK_B, "Design Patterns", "12.50", 9),
+                bookDto(BOOK_C, "The Pragmatic Programmer", "0.01", 40)));
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items().get(0).lineTotal()).isEqualTo(new BigDecimal("63.98"));
+        assertThat(result.items().get(1).lineTotal()).isEqualTo(new BigDecimal("37.50"));
+        assertThat(result.items().get(2).lineTotal()).isEqualTo(new BigDecimal("0.07"));
+        assertThat(result.total()).isEqualTo(new BigDecimal("101.55"));
+        assertThat(result.total().scale()).isEqualTo(2);
+    }
+
+    @Test
+    void read_enrichesEveryLineThroughOneBatchCall_ignoringBatchResponseOrder() {
+        // D-10 / ADR-005: N lines, one keyed lookup — findBook is never the
+        // enrichment path — and because batch order is not contractual
+        // (ADR-009), the response order is the repository's, never the catalog's.
+        Cart cart = existingCart();
+        stubCartWithLines(cart,
+                lineOf(cart, BOOK_ID, 1), lineOf(cart, BOOK_B, 1), lineOf(cart, BOOK_C, 1));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_C, "The Pragmatic Programmer", "49.99", 7),
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12),
+                bookDto(BOOK_B, "Design Patterns", "54.99", 3)));
+
+        CartResponse result = service.read(OWNER);
+
+        assertThat(result.items()).extracting(CartItemResponse::bookId)
+                .containsExactly(BOOK_ID, BOOK_B, BOOK_C);
+        ArgumentCaptor<Collection<UUID>> ids = ArgumentCaptor.captor();
+        verify(catalogClient, times(1)).batchBooks(ids.capture());
+        assertThat(ids.getValue()).containsExactlyInAnyOrder(BOOK_ID, BOOK_B, BOOK_C);
+        verify(catalogClient, never()).findBook(any());
+    }
+
+    @Test
+    void read_whenCartExceedsTheBatchCap_revalidatesEveryIdInChunks() {
+        // ADR-005's partition: CA-11 refuses > 100 ids (400), so 150 lines
+        // ride ceil(150/100) = 2 chunked calls — and FR-11 re-validates
+        // <em>every</em> line, not the first 100: the 150th book is the
+        // out-of-stock one, and its flag plus its exclusion from the total
+        // prove the overflow was fetched, not skipped.
+        Cart cart = existingCart();
+        List<CartItem> lines = new ArrayList<>();
+        for (int i = 1; i <= 150; i++) {
+            lines.add(lineOf(cart, bookIdOf(i), 1));
+        }
+        stubCartWithLines(cart, lines);
+        when(catalogClient.batchBooks(anyCollection())).thenAnswer(invocation -> {
+            Collection<UUID> ids = invocation.getArgument(0);
+            return ids.stream()
+                    .map(id -> bookDto(id, "Seeded Book", "1.00", id.equals(bookIdOf(150)) ? 0 : 5))
+                    .toList();
+        });
+
+        CartResponse result = service.read(OWNER);
+
+        ArgumentCaptor<Collection<UUID>> chunks = ArgumentCaptor.captor();
+        verify(catalogClient, times(2)).batchBooks(chunks.capture());
+        assertThat(chunks.getAllValues()).extracting(Collection::size).containsExactly(100, 50);
+        assertThat(result.items()).hasSize(150);
+        CartItemResponse overflowLine = result.items().get(149);
+        assertThat(overflowLine.available()).isTrue();
+        assertThat(overflowLine.insufficientStock()).isTrue();
+        // 149 sufficient lines at 1.00 each; the flagged overflow contributes nothing.
+        assertThat(result.total()).isEqualTo(new BigDecimal("149.00"));
+    }
+
+    @Test
+    void read_whenCatalogFails_propagatesTheTransportErrorWithoutFabricatingFlags() {
+        // ADR-005's load-bearing line: never fabricate a cart from an
+        // unavailable dependency. A 5xx/down catalog stays the transport
+        // failure GlobalExceptionHandler renders as 503 catalog-unavailable —
+        // not an empty cart, not all-lines-flagged with a zero total, because
+        // "could not ask" is not "the book is gone" (NFR-07).
+        Cart cart = existingCart();
+        stubCartWithLines(cart, lineOf(cart, 2));
+        when(catalogClient.batchBooks(anyCollection())).thenThrow(catalogDown());
+
+        assertThatThrownBy(() -> service.read(OWNER))
+                .isInstanceOf(FeignException.ServiceUnavailable.class);
+
+        verify(catalogClient, times(1)).batchBooks(anyCollection());
     }
 
     // ------------------------------------------------------ exception wire shape

@@ -1,10 +1,18 @@
 package com.foleybooks.order.cart.service;
 
+import com.foleybooks.order.cart.api.CartItemResponse;
+import com.foleybooks.order.cart.api.CartResponse;
+import com.foleybooks.order.cart.client.BookDto;
 import com.foleybooks.order.cart.client.CatalogClient;
 import com.foleybooks.order.cart.domain.Cart;
 import com.foleybooks.order.cart.domain.CartItem;
 import com.foleybooks.order.cart.repository.CartItemRepository;
 import com.foleybooks.order.cart.repository.CartRepository;
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -14,8 +22,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * FR-10's add rule, plan §4's {@code cart.add} made concrete (OR-06) — every
- * branch is a service rule (C8), never controller or entity code. The order of
+ * FR-10's add rule and FR-11's read rule, plan §4's {@code cart.add} /
+ * {@code cart.read} made concrete (OR-06, OR-07) — every branch is a service
+ * rule (C8), never controller or entity code. The order of
  * operations is the plan's: ask catalog first, decide, then write. The
  * {@code findBook} lookup happens <em>outside</em> any transaction (ADR-005:
  * never hold a DB connection across the east-west hop), and its outcome steers
@@ -57,13 +66,53 @@ import org.springframework.transaction.support.TransactionOperations;
  * rewrites (ADR-004); an explicit new add is a different act, and there
  * FR-10's "can never exceed stock" decides. The {@link CartItem} entity
  * stays inside this class: the service hands the {@link CartLine} record
- * across the layer boundary (AGENTS.md §4, C9), and the response projection
- * is the read half's job (OR-07).
+ * across the layer boundary (AGENTS.md §4, C9).
+ *
+ * <p>The read half ({@link #read}, OR-07) is the same two-source discipline in
+ * the other direction, split across the network boundary the way {@link #add}
+ * splits around its caught races: both local loads run inside one short
+ * {@link TransactionOperations} unit — a consistent cart-and-lines snapshot,
+ * which two un-wrapped finds could tear if an add commits in between — and
+ * that unit has already committed before the Feign hop and the in-memory
+ * projection run outside it, because ADR-005 forbids holding a DB connection
+ * open across the east-west call and a request-scoped {@code @Transactional}
+ * wrapper would do exactly that. Flags are computed, never written back:
+ * reading a cart changes nothing in it, and a user with no cart row simply
+ * gets the empty response (FR-11's empty state — {@code add} creates carts,
+ * {@code read} never materializes one). Enrichment is ADR-005's numbered
+ * procedure: one keyed {@code batchBooks} answer for all lines, partitioned
+ * into chunks of {@value #CATALOG_BATCH_MAX_IDS} because CA-11 caps a batch
+ * at that many ids — the chunking is a correctness backstop so a &gt; 100-line
+ * cart cannot 400 the read <em>or</em> silently skip FR-11's stock
+ * re-validation for the overflow, and it keeps the call count at
+ * {@code ceil(lines / 100)}, never one-per-line (D-10). Batch responses carry
+ * no contractual order (ADR-009), so the answer is keyed into a map by
+ * {@code id} and lines are projected in repository order. A book absent from
+ * the answer flags its line unavailable with every catalog-sourced field
+ * {@code null} (LC-14, ADR-005's honest gap); a present book with
+ * {@code quantity > stockQuantity} flags it insufficient while staying fully
+ * populated (LC-30). The money is exact-decimal throughout (D-08, NFR-07):
+ * {@code lineTotal = price × quantity} — an integer multiplier adds no decimal
+ * places to a scale-2 price, so no rounding ever applies — and the grand
+ * {@code total} sums only lines passing <em>both</em> gates (D-10), the final
+ * {@code setScale(2)} a serialization guarantee that throws rather than
+ * silently rounds if a scale ever were to drift. A {@code FeignException}
+ * from the batch propagates untouched: an unreachable catalog fails the read
+ * as a traceable 503-class error, never as a fabricated all-flagged cart whose
+ * zero total would be a money lie (ADR-005, NFR-06, NFR-07).
  */
 @Service
 public class CartServiceImpl implements CartService {
 
     private static final Logger log = LoggerFactory.getLogger(CartServiceImpl.class);
+
+    /** CA-11's batch cap (ADR-009): ids beyond it must be fetched in another chunk, never dropped. */
+    private static final int CATALOG_BATCH_MAX_IDS = 100;
+
+    /** System-wide money convention, never a stored column (ADR-004). */
+    private static final String CURRENCY_EUR = "EUR";
+
+    private static final BigDecimal EMPTY_TOTAL = BigDecimal.ZERO.setScale(2);
 
     private final CatalogClient catalogClient;
     private final CartRepository cartRepository;
@@ -97,6 +146,91 @@ public class CartServiceImpl implements CartService {
         Cart cart = findOrCreateCart(userId);
         CartItem line = upsertLine(cart, bookId, quantity, stock);
         return new CartLine(line.getBookId(), line.getQuantity());
+    }
+
+    @Override
+    public CartResponse read(UUID userId) {
+        // One short TransactionOperations unit loads both local tables as a
+        // consistent snapshot and closes before the network is touched: a
+        // request-scoped @Transactional would hold a DB connection across the
+        // Feign hop, which ADR-005 forbids; two un-wrapped finds would let a
+        // concurrent add commit in between and torn the snapshot (same
+        // programmatic seam as TokenServiceImpl's rotation and add's races).
+        List<CartItem> lines = transactionOperations.execute(tx -> cartRepository.findByUserId(userId)
+                .map(cart -> cartItemRepository.findByCartId(cart.getId()))
+                .orElseGet(List::of));
+        if (lines.isEmpty()) {
+            // FR-11's empty state: no cart row and a cart with no lines are
+            // indistinguishable to the caller, and neither reaches the catalog.
+            return emptyCart();
+        }
+
+        Map<UUID, BookDto> booksById = fetchBooksById(lines);
+        List<CartItemResponse> items = new ArrayList<>(lines.size());
+        for (CartItem line : lines) {
+            items.add(enrich(line, booksById.get(line.getBookId())));
+        }
+        // D-08/NFR-07: computed server-side, flagged lines excluded (D-10), and
+        // scale-2 addends sum exactly — a final setScale(2) that would throw
+        // rather than round if the exactness invariant ever broke upstream.
+        BigDecimal total = items.stream()
+                .filter(item -> item.available() && !item.insufficientStock())
+                .map(CartItemResponse::lineTotal)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2);
+        return new CartResponse(items, total, CURRENCY_EUR);
+    }
+
+    /**
+     * FR-11's empty state (ADR-004: demo accounts start here): an empty item
+     * list and an exact {@code 0.00} total — a cart with no rows and no cart
+     * row at all are indistinguishable to the caller, and neither is an error.
+     */
+    private static CartResponse emptyCart() {
+        return new CartResponse(List.of(), EMPTY_TOTAL, CURRENCY_EUR);
+    }
+
+    /**
+     * One keyed batch lookup (or {@code ceil(lines / 100)} of them — D-10
+     * forbids one call per line, CA-11's {@code MAX_SIZE} forbids one call per
+     * bigger list; ADR-005's partition is the correctness backstop that keeps
+     * FR-11's promise of re-validating <em>every</em> line). The answer is
+     * keyed by {@code id} because batch order is not contractual (ADR-009);
+     * an id absent from every chunk is LC-14's gap, read later as
+     * {@code available=false}. A failed call propagates as the transport
+     * exception it is — absence is data, unavailability is an error (ADR-005).
+     */
+    private Map<UUID, BookDto> fetchBooksById(List<CartItem> lines) {
+        List<UUID> bookIds = lines.stream().map(CartItem::getBookId).toList();
+        Map<UUID, BookDto> booksById = new HashMap<>();
+        for (int from = 0; from < bookIds.size(); from += CATALOG_BATCH_MAX_IDS) {
+            List<UUID> chunk = bookIds.subList(from, Math.min(from + CATALOG_BATCH_MAX_IDS, bookIds.size()));
+            for (BookDto book : catalogClient.batchBooks(chunk)) {
+                booksById.put(book.id(), book);
+            }
+        }
+        return booksById;
+    }
+
+    /**
+     * ADR-005's per-line derivation. {@code book == null} is the batch's
+     * absent entry: the line keeps only its stored intent ({@code bookId},
+     * {@code quantity}) plus {@code available=false}, every catalog-sourced
+     * field {@code null} — there is no book to read, and a made-up price or
+     * bound would be a second truth (LC-14). A present line is fully
+     * populated, with {@code insufficientStock} comparing the stored quantity
+     * against the live stock (LC-30 — equality is still sufficient) and
+     * {@code lineTotal} the exact scale-2 product of live price and quantity.
+     */
+    private static CartItemResponse enrich(CartItem line, BookDto book) {
+        if (book == null) {
+            return new CartItemResponse(line.getBookId(), null, null, null, null,
+                    line.getQuantity(), null, null, false, false);
+        }
+        return new CartItemResponse(line.getBookId(), book.title(), book.author(), book.coverUrl(),
+                book.price(), line.getQuantity(),
+                book.price().multiply(BigDecimal.valueOf(line.getQuantity())),
+                book.stockQuantity(), true, line.getQuantity() > book.stockQuantity());
     }
 
     /**
