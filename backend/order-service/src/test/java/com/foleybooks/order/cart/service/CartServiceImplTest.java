@@ -84,6 +84,11 @@ import org.springframework.transaction.support.TransactionOperations;
  * catalog entirely (which is what keeps an LC-14 line clearable), the local
  * line-not-found 404 that answers before the east-west hop, and the live stock
  * gate shared with {@link CartService#add} (LC-12, LC-16).
+ *
+ * <p>OR-09 adds the removal half — FR-13 through the DELETE verb: the same
+ * local, catalog-free {@code removeLine} as the zero branch, with idempotence
+ * as the contract (absent line and absent cart delete nothing and raise
+ * nothing) and no composed read, because the plan §2 204 carries no body.
  */
 class CartServiceImplTest {
 
@@ -904,6 +909,71 @@ class CartServiceImplTest {
         verify(cartItemRepository, never()).save(any());
         // The answer is local again: the rejected write never reaches the read.
         verify(catalogClient, never()).batchBooks(anyCollection());
+    }
+
+    // ------------------------------------------------------ plan §6.1 / OR-09: the removal (FR-13)
+
+    @Test
+    void delete_whenLineExists_removesItWithoutAnyCatalogCallOrEnrichedRead() {
+        // FR-13 through its own verb is the same local, catalog-free delete
+        // FR-12's zero branch runs (ADR-010: a removal asserts no stock bound):
+        // the line is deleted, catalog is never asked, and — unlike POST/PATCH —
+        // no read composes behind the 204, so the enrichment batch never fires.
+        Cart cart = existingCart();
+        CartItem line = lineOf(cart, 2);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.of(line));
+
+        service.delete(OWNER, BOOK_ID);
+
+        verify(cartItemRepository).delete(line);
+        verifyNoInteractions(catalogClient);
+        verify(cartItemRepository, never()).findByCartId(CART_ID);
+    }
+
+    @Test
+    void delete_whenCartHoldsNoSuchLine_isAnIdempotentSuccessThatDeletesNothing() {
+        // FR-13's second clause is the contract, not an error path: "removing a
+        // non-existent line → success". The requested state — no line for this
+        // book — already holds, so nothing is deleted and no not-found is raised
+        // (ADR-010: DELETE must not add a third not-found semantics).
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.empty());
+
+        service.delete(OWNER, BOOK_ID);
+
+        verify(cartItemRepository, never()).delete(any());
+        verifyNoInteractions(catalogClient);
+    }
+
+    @Test
+    void delete_whenUserHasNoCart_isAnIdempotentSuccessWithoutTouchingAnything() {
+        // No cart row and no line are one and the same nothing-to-remove (FR-11's
+        // empty state, reached through the removal verb): success, nothing
+        // written, nothing read, nothing asked of catalog.
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.empty());
+
+        service.delete(OWNER, BOOK_ID);
+
+        verifyNoInteractions(catalogClient, cartItemRepository);
+    }
+
+    @Test
+    void delete_whenLineAddressesAVanishedBook_stillRemovesItWithoutLookingItUp() {
+        // The ADR-010 posture that keeps an LC-14 line actionable through FR-13:
+        // the book is gone from catalog, but a removal never consults it, so a
+        // mandatory findBook would have answered book-not-found and stranded the
+        // line forever. Here the delete runs regardless of the vanished book.
+        Cart cart = existingCart();
+        CartItem goneLine = lineOf(cart, BOOK_GONE, 3);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_GONE)).thenReturn(Optional.of(goneLine));
+
+        service.delete(OWNER, BOOK_GONE);
+
+        verify(cartItemRepository).delete(goneLine);
+        verifyNoInteractions(catalogClient);
     }
 
     // ------------------------------------------------------ exception wire shape

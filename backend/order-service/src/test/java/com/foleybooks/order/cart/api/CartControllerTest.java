@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -60,7 +61,11 @@ import org.springframework.test.web.servlet.MockMvc;
  * OR-06 and OR-07: a line is addressed by the book's public UUID (ADR-005),
  * quantities travel as JSON numbers, and every state-changing answer is the
  * full enriched cart, so totals recalculate server-side without a follow-up
- * read (D-08).
+ * read (D-08). OR-09 closes the map with the DELETE row (FR-13): an
+ * authenticated removal answers the bare 204 — its idempotence is the
+ * service's rule and can never surface as a 404 on this wire — so the
+ * boundary's own rejections stay the two the other verbs already proved:
+ * the chain's anonymous 401 and the binder's malformed-bookId 400.
  */
 @WebMvcTest(CartController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class})
@@ -406,6 +411,64 @@ class CartControllerTest {
         mockMvc.perform(patch("/api/v1/cart/items/{bookId}", BOOK_ID)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"quantity\": 3}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:unauthenticated"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(cartService);
+    }
+
+    // ------------------------------------------------------------------ DELETE /api/v1/cart/items/{bookId} (FR-13)
+
+    @Test
+    void removeItem_whenRequested_responds204AndComposesNoRead() throws Exception {
+        // Plan §2's DELETE row → 204 (idempotent): no body, and — unlike the
+        // POST/PATCH writes that answer the enriched cart — the handler composes
+        // no read back, so the service's read view is never even asked for.
+        mockMvc.perform(delete("/api/v1/cart/items/{bookId}", BOOK_ID).with(customerJwt()))
+                .andExpect(status().isNoContent())
+                .andExpect(content().string(""));
+
+        // The owner is the token's sub; the removal never needs a cart id (ADR-004).
+        verify(cartService).delete(OWNER, BOOK_ID);
+        verify(cartService, never()).read(any());
+    }
+
+    @Test
+    void removeItem_whenLineIsAlreadyGone_stillAnswers204ForTheIdempotentSuccess() throws Exception {
+        // FR-13's idempotence is the service's rule (unit-tested in
+        // CartServiceImplTest); the wire contract this row of plan §2 pins is
+        // that the handler never inspects the outcome to invent a not-found —
+        // a void delete plus no composed read answers the bare 204 regardless.
+        // A mocked void delete already does nothing, which is exactly the
+        // already-removed case, so no stubbing is needed (or wanted).
+        mockMvc.perform(delete("/api/v1/cart/items/{bookId}", BOOK_ID).with(customerJwt()))
+                .andExpect(status().isNoContent());
+
+        verify(cartService).delete(OWNER, BOOK_ID);
+    }
+
+    @ParameterizedTest(name = "bookId {0} is a 400 validation error (LC-28, D-07 path reading)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "cb06"})
+    void removeItem_whenBookIdIsMalformed_rejectedWith400BeforeTheService(String rawBookId) throws Exception {
+        // The same boundary asymmetry as the other two verbs addressing a line
+        // by public book UUID: a malformed id is the shared 400 (field bookId),
+        // so it never reaches the idempotent service call (C23, D-07 as amended).
+        mockMvc.perform(delete("/api/v1/cart/items/{bookId}", rawBookId).with(customerJwt()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.errors[0].field").value("bookId"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"));
+
+        verifyNoInteractions(cartService);
+    }
+
+    @Test
+    void removeItem_whenRequestedAnonymously_deniesWithUnauthorizedProblemDetail() throws Exception {
+        // LC-27 on the removal verb: the whole cart tree is authenticated-only,
+        // and the 401 is the chain's ProblemDetail before any handler runs — the
+        // idempotent 204 never becomes an anonymous answer.
+        mockMvc.perform(delete("/api/v1/cart/items/{bookId}", BOOK_ID))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.type").value("urn:foley-books:problem:unauthenticated"))
                 .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));

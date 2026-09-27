@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,15 +22,14 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The authenticated cart's HTTP surface (FR-10..FR-12, plan §2), thin by
+ * The authenticated cart's HTTP surface (FR-10..FR-13, plan §2), thin by
  * constitutional mandate (C8): bind and validate at the boundary, delegate to
  * {@link CartService}, map the result — every stock gate, flag and total is
  * the service's rule, and nothing here decides anything a request could talk
- * its way past. OR-08 opens the tree with its three delivered operations —
- * read (OR-07), add (OR-06) and change-quantity (this task);
- * {@code DELETE /cart/items/{bookId}} joins with OR-09, and the plan §2
- * endpoint map is otherwise complete here: paths are plural resources, the
- * verbs are the verbs (AGENTS.md §6), and a line is addressed by the
+ * its way past. OR-09 completes the tree with its four operations —
+ * read (OR-07), add (OR-06), change-quantity (OR-08) and remove (this task):
+ * the plan §2 endpoint map is now exactly the handler tree, paths are plural
+ * resources, verbs are the verbs (AGENTS.md §6), and a line is addressed by the
  * catalog's public book UUID, never by an internal row id (ADR-004: the cart
  * is addressed by identity, the line by book).
  *
@@ -51,23 +51,30 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>Responses follow plan §2 exactly: {@code GET /cart} and {@code PATCH
  * /cart/items/{bookId}} answer 200 with the full {@link CartResponse} —
  * FR-12's change returns the resulting cart, so totals recalculate live and
- * the client needs no follow-up read — while {@code POST /cart/items} answers
- * 201 with the same view plus a {@code Location} at the line's own address.
- * The 201 body composes add then read (plan §4's {@code cart.add} ends
- * {@code return cart.read(userId)}); a failed add never reaches the read. The
- * error statuses ride the service's exceptions through the shared advice:
- * 400 validation {@code errors[]} and malformed bodies (C23, LC-16 —
- * negative/missing quantity, a non-UUID {@code bookId} from the binder,
- * non-numeric bodies), 404 {@code book-not-found} and {@code
- * cart-line-not-found}, 422 {@code insufficient-stock} carrying {@code
+ * the client needs no follow-up read — {@code POST /cart/items} answers 201
+ * with the same view plus a {@code Location} at the line's own address, and
+ * {@code DELETE /cart/items/{bookId}} (FR-13, OR-09) answers the bare {@code
+ * 204} with no body at all: a removal has nothing to show, and the client's
+ * next read carries the recalculated totals (D-08). The 201 body composes add
+ * then read (plan §4's {@code cart.add} ends {@code return cart.read(userId)});
+ * a failed add never reaches the read. The error statuses ride the service's
+ * exceptions through the shared advice: 400 validation {@code errors[]} and
+ * malformed bodies (C23, LC-16 — negative/missing quantity, a non-UUID {@code
+ * bookId} from the binder, non-numeric bodies), 404 {@code book-not-found} and
+ * {@code cart-line-not-found}, 422 {@code insufficient-stock} carrying {@code
  * availableStock} (LC-12), 503 {@code catalog-unavailable} (ADR-005) — all
- * ProblemDetail with traceId (D-15, NFR-06). LC-27's anonymous 401 happens in
+ * ProblemDetail with traceId (D-15, NFR-06). DELETE raises none of those
+ * service statuses — there is no gate to miss and no not-found to manufacture
+ * (a line the cart does not hold is FR-13's idempotent success, and the
+ * handler adds no verdict of its own) — so the only rejections this route can
+ * ever answer are the chain's 401 and the binder's malformed-{@code bookId}
+ * 400, neither of which reaches the service. LC-27's anonymous 401 happens in
  * the filter chain before any handler method runs (C25: never disabled,
  * never bypassed).
  */
 @RestController
 @RequestMapping("/api/v1/cart")
-@Tag(name = "Cart", description = "The caller's persistent per-user cart: read, add, change (FR-10..FR-12)")
+@Tag(name = "Cart", description = "The caller's persistent per-user cart: read, add, change, remove (FR-10..FR-13)")
 public class CartController {
 
     private final CartService cartService;
@@ -113,6 +120,26 @@ public class CartController {
             @PathVariable(name = "bookId") UUID bookId,
             @Valid @RequestBody UpdateQuantityRequest request) {
         return ResponseEntity.ok(cartService.update(ownerId(jwt), bookId, request.quantity()));
+    }
+
+    @DeleteMapping("/items/{bookId}")
+    @Operation(summary = "Remove a line from the cart",
+            description = "Removes the caller's line for this book outright (FR-13): idempotent 204 with no body — "
+                    + "a line the cart does not hold, or no cart at all, is the requested state already and answers "
+                    + "the same success. No catalog lookup gates a removal, so a flagged line whose book vanished "
+                    + "(LC-14) stays removable through this verb too; totals recalculate on the next read.")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<Void> removeItem(@AuthenticationPrincipal Jwt jwt,
+            @Parameter(description = "Public UUID of the book whose line is removed — the bookId the read view "
+                    + "published.", example = "00000000-0000-0000-0000-00000000cb06")
+            @PathVariable(name = "bookId") UUID bookId) {
+        cartService.delete(ownerId(jwt), bookId);
+        // 204 No Content, the plan §2 DELETE row: a removal shows nothing, so no
+        // read composes behind it (unlike POST/PATCH) and there is no body to
+        // enrich. The only rejection this route ever sees is a non-UUID bookId,
+        // produced by the binder before this method runs (C23) — the service
+        // never raises a not-found here (FR-13's idempotence, ADR-010).
+        return ResponseEntity.noContent().build();
     }
 
     /**

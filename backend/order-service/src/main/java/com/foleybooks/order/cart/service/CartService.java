@@ -92,4 +92,26 @@ public interface CartService {
      * @throws InsufficientStockException  if the quantity exceeds live stock
      */
     CartResponse update(UUID userId, UUID bookId, int quantity);
+
+    /**
+     * Remove the user's line for {@code bookId} outright (FR-13) — the verb form
+     * of FR-12's zero branch, the same local, catalog-free deletion spoken with
+     * its own HTTP verb (ADR-010: a removal addresses no stock bound, so it
+     * must never ask catalog — which is exactly what keeps a vanished book's
+     * LC-14 line removable through this endpoint too).
+     *
+     * <p>FR-13's second clause is the contract, not an error path:
+     * <em>removing a non-existent line is a success</em>. The caller asked for
+     * a state — "my cart holds no line for this book" — and after this call it
+     * holds, whether or not anything was deleted; an absent line or an absent
+     * cart is a silent no-op, and no third not-found semantics joins the two
+     * {@link #update} already answers with (ADR-010's consequence). The answer
+     * is the empty {@code 204} of plan §2 — no body, so nothing to read back:
+     * unlike POST and PATCH this verb composes no FR-11 read, and the client's
+     * next read carries the recalculated totals FR-13 promises.
+     *
+     * @param userId owner taken from the validated token's {@code sub} claim
+     * @param bookId catalog public identifier of the book whose line is removed
+     */
+    void delete(UUID userId, UUID bookId);
 }

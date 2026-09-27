@@ -126,6 +126,19 @@ import org.springframework.transaction.support.TransactionOperations;
  * no order between two explicit user intents. The response is the full {@link
  * #read} view after the change (plan §2: 200 CartResponse), so totals
  * recalculate live and the client never re-fetches to see the effect.
+ *
+ * <p>The removal half ({@link #delete}, OR-09) is FR-13 spoken with its own
+ * verb, and it reuses {@link #removeLine} verbatim — the exact local,
+ * catalog-free delete FR-12's zero branch already runs (ADR-010: a removal
+ * addresses no stock bound and no live product, so it must never ask
+ * catalog; that is what keeps a vanished book's LC-14 line clearable through
+ * either verb). FR-13's idempotence is the whole contract: removing a line
+ * the cart does not hold — or having no cart at all — is the requested state
+ * already holding, so {@link #removeLine} no-ops and this returns normally,
+ * never a not-found. Unlike {@link #update}'s zero branch it does not
+ * compose a {@link #read}: the answer is the empty {@code 204} of plan §2,
+ * no body to enrich and no totals to return, because there is nothing to
+ * show — the client's next read reflects the removal.
  */
 @Service
 public class CartServiceImpl implements CartService {
@@ -236,6 +249,18 @@ public class CartServiceImpl implements CartService {
         }
         setLineQuantity(userId, bookId, quantity);
         return read(userId);
+    }
+
+    @Override
+    public void delete(UUID userId, UUID bookId) {
+        // FR-13 through its own verb, and the same rule FR-12's zero branch
+        // runs: the local, catalog-free removeLine. A removal asserts no stock
+        // bound and no live product (ADR-010), so no east-west hop guards this
+        // door — an LC-14 line whose book vanished, and a cart or line that is
+        // already gone, all reach the same silent success. The 204 has no body:
+        // unlike update, nothing composes a read here; the client's next read
+        // carries FR-13's recalculated totals.
+        removeLine(userId, bookId);
     }
 
     /**
@@ -381,13 +406,16 @@ public class CartServiceImpl implements CartService {
     }
 
     /**
-     * FR-12's zero branch: delete the addressed line when present, in one unit
-     * (ADR-004 — the schema has no zero row to write). Absent cart or absent
+     * The shared removal both verbs delegate to — FR-12's zero branch and
+     * FR-13's DELETE (OR-09): delete the addressed line when present, in one
+     * unit (ADR-004 — the schema has no zero row to write). Absent cart or absent
      * line is a no-op, never an error: the requested state is the current one,
-     * the idempotence FR-13 spells for DELETE lives here for the set-to-zero
-     * route too. The {@code cart_items} row's deletion is the whole of the
-     * user's intent — the cart row itself survives (ADR-004: carts are never
-     * purged in the MVP), so a later add reuses it.
+     * the idempotence FR-13 spells for DELETE and that ADR-010 inherits into the
+     * set-to-zero route too. No east-west lookup runs here (ADR-010: a removal
+     * asserts no stock bound), which is what keeps an LC-14 line whose book
+     * vanished removable through either verb. The {@code cart_items} row's
+     * deletion is the whole of the user's intent — the cart row itself survives
+     * (ADR-004: carts are never purged in the MVP), so a later add reuses it.
      */
     private void removeLine(UUID userId, UUID bookId) {
         transactionOperations.execute(tx -> cartRepository.findByUserId(userId)
