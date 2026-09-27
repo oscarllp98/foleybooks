@@ -65,7 +65,10 @@ import org.springframework.test.web.servlet.MockMvc;
  * authenticated removal answers the bare 204 — its idempotence is the
  * service's rule and can never surface as a 404 on this wire — so the
  * boundary's own rejections stay the two the other verbs already proved:
- * the chain's anonymous 401 and the binder's malformed-bookId 400.
+ * the chain's anonymous 401 and the binder's malformed-bookId 400. OR-10 closes
+ * the slice's auth matrix: all four verbs now answer LC-27's anonymous 401 and
+ * the plan §2 happy-path statuses (200 GET, 201 POST, 200 PATCH, 204 DELETE)
+ * through the same customer {@code jwt()} post-processor.
  */
 @WebMvcTest(CartController.class)
 @Import({SecurityConfig.class, ProblemDetailResponder.class})
@@ -247,6 +250,27 @@ class CartControllerTest {
                 .andExpect(jsonPath("$.bookId").value(BOOK_ID.toString()));
 
         verify(cartService, never()).read(any());
+    }
+
+    @Test
+    void addItem_whenRequestedAnonymously_deniesWithUnauthorizedProblemDetail() throws Exception {
+        // LC-27 on the add verb (FR-10): the frontend's login prompt depends on
+        // this exact 401, and the return-after-login redirect depends on it
+        // being the chain's answer — the ProblemDetail the responder publishes
+        // before any handler runs, so nothing is ever added to an
+        // unresolvable owner and no empty-cart 200 can leak past security.
+        mockMvc.perform(post("/api/v1/cart/items")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"bookId": "%s", "quantity": 1}
+                                """.formatted(BOOK_ID)))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:unauthenticated"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/cart/items"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(cartService);
     }
 
     // ------------------------------------------------------------------ PATCH /api/v1/cart/items/{bookId} (FR-12)
