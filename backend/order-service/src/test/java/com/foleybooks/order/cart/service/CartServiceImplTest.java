@@ -78,6 +78,12 @@ import org.springframework.transaction.support.TransactionOperations;
  * one consistent unit that has committed before the Feign hop — is pinned with
  * a self-tracking {@code TransactionOperations}, the same seam
  * {@code UserServiceImplTest} uses for post-commit mail dispatch.
+ *
+ * <p>OR-08 adds the change half — FR-12's set-not-sum semantics (plan §2's 200
+ * CartResponse answers the resulting cart), the zero-removal that skips the
+ * catalog entirely (which is what keeps an LC-14 line clearable), the local
+ * line-not-found 404 that answers before the east-west hop, and the live stock
+ * gate shared with {@link CartService#add} (LC-12, LC-16).
  */
 class CartServiceImplTest {
 
@@ -622,6 +628,284 @@ class CartServiceImplTest {
         verify(catalogClient, times(1)).batchBooks(anyCollection());
     }
 
+    // ------------------------------------------------------ plan §6.1 / OR-08: the change (FR-12)
+
+    @Test
+    void update_whenQuantityWithinStock_setsTheExactQuantityAndAnswersTheEnrichedCart() {
+        // FR-12 is a SET, not FR-10's sum: 2 on the line, 5 requested → 5 stored,
+        // never 7 (naming the resulting state twice cannot drift it). The 200
+        // body is the full FR-11 read view of the changed cart (plan §2), so
+        // totals recalculate live and no follow-up GET is the client's job.
+        stubStock(12);
+        stubPersistencePassThrough();
+        Cart cart = existingCart();
+        CartItem line = lineOf(cart, 2);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.of(line));
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(List.of(line));
+        when(catalogClient.batchBooks(List.of(BOOK_ID))).thenReturn(List.of(bookDto(
+                BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 5);
+
+        assertThat(captureSavedLine().getQuantity()).isEqualTo(5);
+        assertThat(result).isEqualTo(new CartResponse(
+                List.of(new CartItemResponse(BOOK_ID, "Clean Code", "Robert C. Martin", COVER_URL,
+                        new BigDecimal("31.99"), 5, new BigDecimal("159.95"), 12, true, false)),
+                new BigDecimal("159.95"), "EUR"));
+        // One live lookup for the bound — the ADR-005 singular, never the batch —
+        // plus the batch that answers the response. No insert: the line already exists.
+        verify(catalogClient, times(1)).findBook(BOOK_ID);
+        verify(cartItemRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void update_whenQuantityEqualsStock_setsExactlyTheFulfillableBoundary() {
+        // LC-30's boundary, write-side: ordering all 12 of 12 is sufficient —
+        // quantity == stock passes the gate and flags nothing.
+        stubStock(12);
+        stubPersistencePassThrough();
+        Cart cart = existingCart();
+        CartItem line = lineOf(cart, 2);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.of(line));
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(List.of(line));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 12);
+
+        assertThat(captureSavedLine().getQuantity()).isEqualTo(12);
+        assertThat(result.items().get(0).insufficientStock()).isFalse();
+        assertThat(result.total()).isEqualTo(new BigDecimal("383.88"));
+    }
+
+    @ParameterizedTest(name = "requested {0} against stock {1} -> 422 availableStock {1} (FR-12, LC-12, LC-16)")
+    @CsvSource({"13, 12", "4, 3", "99, 1", "1, 0"})
+    void cart_update_aboveStock_rejectedWithAvailableStock(int requested, int stock) {
+        // FR-12's half of the same gate FR-10 enforces (LC-12): above stock —
+        // including stock 0, "an out-of-stock book" — is rejected with the live
+        // bound and writes nothing. Unlike add's capped sum, an update has no
+        // helpful interpretation: 13 of 12 is never quietly a 12.
+        stubStock(stock);
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID))
+                .thenReturn(Optional.of(lineOf(cart, 2)));
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, requested))
+                .isInstanceOfSatisfying(InsufficientStockException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                    assertThat(ex.getType()).isEqualTo("urn:foley-books:problem:insufficient-stock");
+                    assertThat(ex.getProperties()).containsEntry("availableStock", stock);
+                });
+
+        verify(cartItemRepository, never()).save(any());
+        verify(cartItemRepository, never()).saveAndFlush(any());
+        verify(cartItemRepository, never()).delete(any());
+        // A rejected change answers no cart: the enrichment read never runs.
+        verify(cartItemRepository, never()).findByCartId(CART_ID);
+        verify(catalogClient, never()).batchBooks(anyCollection());
+    }
+
+    @Test
+    void update_whenQuantityNegative_rejectsAgainstLiveStockWithoutWriting() {
+        // LC-16's negatives: the boundary's @Min(0) is the first wall (C23); this
+        // is the service-level re-check that mirrors add's — no caller, however it
+        // reached the rule, stores a non-positive intent via the set branch, and
+        // the rejection still carries the live bound. Zero never lands here:
+        // it is FR-12's removal branch, checked before the gate.
+        stubStock(12);
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID))
+                .thenReturn(Optional.of(lineOf(cart, 2)));
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, -3))
+                .isInstanceOfSatisfying(InsufficientStockException.class,
+                        ex -> assertThat(ex.getProperties()).containsEntry("availableStock", 12));
+
+        verify(cartItemRepository, never()).save(any());
+        verify(cartItemRepository, never()).delete(any());
+    }
+
+    @Test
+    void update_whenLineIsAlreadyAboveStock_setsItBackWithinBounds() {
+        // LC-30's remediation, the action FR-11 tells the user to take: the
+        // defensive over-line (stock fell under quantity — legal at rest,
+        // ADR-004) is corrected by an explicit set to the live bound. The
+        // answer's flags recalculate from the new state: 12 of 12 is sufficient.
+        stubStock(12);
+        stubPersistencePassThrough();
+        Cart cart = existingCart();
+        CartItem line = lineOf(cart, 15);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.of(line));
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(List.of(line));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_ID, "Clean Code", "31.99", 12)));
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 12);
+
+        assertThat(captureSavedLine().getQuantity()).isEqualTo(12);
+        assertThat(result.items().get(0).insufficientStock()).isFalse();
+        assertThat(result.total()).isEqualTo(new BigDecimal("383.88"));
+    }
+
+    @Test
+    void update_whenQuantityZero_removesTheLineAndAnswersTheEmptiedCart() {
+        // FR-12's explicit zero is a DELETE, never a stored zero (ADR-004's
+        // CHECK makes one unrepresentable — updating to 0 first would be a
+        // constraint-violation 500 instead of this 200). And it asks catalog
+        // NOTHING: a removal addresses no stock bound, which is exactly what
+        // keeps a vanished book's LC-14 line clearable through this verb.
+        Cart cart = existingCart();
+        CartItem line = lineOf(cart, 2);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.of(line));
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(List.of());
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 0);
+
+        verify(cartItemRepository).delete(line);
+        verify(cartItemRepository, never()).save(any());
+        verifyNoInteractions(catalogClient);
+        // The emptied cart is FR-11's empty state: the cart row survives (carts
+        // are never purged, ADR-004), items empty, total exactly 0.00.
+        assertThat(result).isEqualTo(new CartResponse(List.of(), new BigDecimal("0.00"), "EUR"));
+    }
+
+    @Test
+    void update_whenQuantityZeroForAnAbsentLine_isIdempotentSuccess() {
+        // FR-13's idempotence lives in the zero route too: "already not there"
+        // is the requested state, answered with the cart as it stands — no
+        // delete attempted, no lookup, no error. (The positive branch is the
+        // one that requires a line: see the 404 tests below.)
+        Cart cart = existingCart();
+        CartItem otherLine = lineOf(cart, BOOK_B, 1);
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.empty());
+        when(cartItemRepository.findByCartId(CART_ID)).thenReturn(List.of(otherLine));
+        when(catalogClient.batchBooks(anyCollection())).thenReturn(List.of(
+                bookDto(BOOK_B, "Design Patterns", "54.99", 3)));
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 0);
+
+        verify(cartItemRepository, never()).delete(any());
+        assertThat(result.items()).containsExactly(
+                new CartItemResponse(BOOK_B, "Design Patterns", "Robert C. Martin", COVER_URL,
+                        new BigDecimal("54.99"), 1, new BigDecimal("54.99"), 3, true, false));
+        verify(catalogClient, never()).findBook(any());
+    }
+
+    @Test
+    void update_whenQuantityZeroAndUserHasNoCart_answersTheEmptyCart() {
+        // No cart row and no line are one and the same nothing-to-remove (FR-11's
+        // empty state reached through the zero branch): 200 empty, nothing written.
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.empty());
+
+        CartResponse result = service.update(OWNER, BOOK_ID, 0);
+
+        assertThat(result).isEqualTo(new CartResponse(List.of(), new BigDecimal("0.00"), "EUR"));
+        verifyNoInteractions(catalogClient, cartItemRepository);
+    }
+
+    @Test
+    void update_whenPositiveQuantityAddressesNoLine_rejectsBeforeAnyCatalogCall() {
+        // FR-12 changes "a line's" quantity and never creates one — creation is
+        // FR-10's POST — so a positive quantity for a book the cart does not
+        // hold is 404 cart-line-not-found, answered LOCALLY, before the
+        // east-west hop (and before the stock gate: quantity 4 of a stock-3
+        // book names a missing line first; the bound is moot without a line).
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, 4))
+                .isInstanceOfSatisfying(CartLineNotFoundException.class, ex -> {
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(ex.getType()).isEqualTo("urn:foley-books:problem:cart-line-not-found");
+                    assertThat(ex.getProperties()).containsEntry("bookId", BOOK_ID.toString());
+                });
+
+        verifyNoInteractions(catalogClient);
+        verify(cartItemRepository, never()).save(any());
+        verify(cartItemRepository, never()).delete(any());
+    }
+
+    @Test
+    void update_whenUserHasNoCartAndQuantityPositive_rejectsLineNotFound() {
+        // No cart row can hold the line: the same 404 as an absent line in a
+        // present cart — the caller addresses something that is not there, and
+        // no network call decides that.
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, 1))
+                .isInstanceOf(CartLineNotFoundException.class);
+
+        verifyNoInteractions(catalogClient, cartItemRepository);
+    }
+
+    @Test
+    void update_whenBookVanished_propagatesTheNotFoundWithoutWriting() {
+        // The LC-14 line and a positive quantity: existence was settled locally,
+        // then the live lookup says the book itself is gone — the decoder's
+        // BookNotFoundException passes through untouched (ADR-005: the singular
+        // read's absence is data), and the two 404s stay distinct: line-not-
+        // found here never fires for a line that exists.
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID))
+                .thenReturn(Optional.of(lineOf(cart, 2)));
+        when(catalogClient.findBook(BOOK_ID)).thenThrow(BookNotFoundException.forId(BOOK_ID));
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, 3))
+                .isInstanceOf(BookNotFoundException.class);
+
+        verify(cartItemRepository, never()).save(any());
+        verify(cartItemRepository, never()).delete(any());
+    }
+
+    @Test
+    void update_whenCatalogUnreachableAtTheGate_propagatesTheTransportErrorWithoutWriting() {
+        // ADR-005's load-bearing line on the write side too: an unreachable
+        // catalog fails the change as the transport error GlobalExceptionHandler
+        // renders 503 catalog-unavailable — never as an accepted set against an
+        // invented bound (NFR-07).
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID))
+                .thenReturn(Optional.of(lineOf(cart, 2)));
+        when(catalogClient.findBook(BOOK_ID)).thenThrow(catalogDown());
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, 3))
+                .isInstanceOf(FeignException.ServiceUnavailable.class);
+
+        verify(cartItemRepository, never()).save(any());
+        verify(cartItemRepository, never()).delete(any());
+    }
+
+    @Test
+    void update_whenLineVanishesBetweenChecks_answersLineNotFoundInsteadOfResurrectingIt() {
+        // The concurrent-removal race (the other session's DELETE is exactly
+        // this): the existence check passed, the write unit re-loads and finds
+        // nothing — it refuses rather than merging the stale detached line back
+        // into existence (ADR-004: intent deleted is intent withdrawn).
+        stubStock(12);
+        Cart cart = existingCart();
+        when(cartRepository.findByUserId(OWNER)).thenReturn(Optional.of(cart));
+        when(cartItemRepository.findByCartIdAndBookId(CART_ID, BOOK_ID))
+                .thenReturn(Optional.of(lineOf(cart, 2)))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.update(OWNER, BOOK_ID, 5))
+                .isInstanceOf(CartLineNotFoundException.class);
+
+        verify(cartItemRepository, never()).save(any());
+        // The answer is local again: the rejected write never reaches the read.
+        verify(catalogClient, never()).batchBooks(anyCollection());
+    }
+
     // ------------------------------------------------------ exception wire shape
 
     @Test
@@ -634,6 +918,20 @@ class CartServiceImplTest {
         assertThat(ex.getDetail()).isEqualTo("Only 3 units left.");
         assertThat(ex.getProperties()).containsOnlyKeys("availableStock");
         assertThat(ex.getProperties()).containsEntry("availableStock", 3);
+    }
+
+    @Test
+    void cartLineNotFoundException_whenRaised_carriesNotFoundAndEchoesTheBookId() {
+        CartLineNotFoundException ex = CartLineNotFoundException.forBookId(BOOK_ID);
+
+        assertThat(ex.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(ex.getType()).isEqualTo("urn:foley-books:problem:cart-line-not-found");
+        assertThat(ex.getTitle()).isEqualTo("Cart line not found");
+        assertThat(ex.getDetail()).isEqualTo("The cart holds no line for the given book.");
+        // The plan §2 extra-property echo shape (bookId/availableStock/resendHint),
+        // for NFR-06 traceability only — the cart is private state.
+        assertThat(ex.getProperties()).containsOnlyKeys("bookId");
+        assertThat(ex.getProperties()).containsEntry("bookId", BOOK_ID.toString());
     }
 
     @ParameterizedTest(name = "availableStock {0} phrases the detail from the same number (plan §2)")

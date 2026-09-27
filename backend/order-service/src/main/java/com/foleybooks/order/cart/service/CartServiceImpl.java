@@ -100,6 +100,32 @@ import org.springframework.transaction.support.TransactionOperations;
  * from the batch propagates untouched: an unreachable catalog fails the read
  * as a traceable 503-class error, never as a fabricated all-flagged cart whose
  * zero total would be a money lie (ADR-005, NFR-06, NFR-07).
+ *
+ * <p>The change half ({@link #update}, OR-08) is FR-12's explicit intent, and
+ * its three branches differ from {@link #add} on purpose: the quantity is
+ * <em>set</em>, never summed (naming the resulting state twice cannot drift it
+ * — LC-13's summing belongs to adds alone); zero <em>deletes</em> the line
+ * without consulting catalog at all, because {@code
+ * ck_cart_items_quantity} makes a stored zero unrepresentable (ADR-004) and a
+ * removal addresses no stock bound — skipping the lookup is what lets a user
+ * clear an LC-14 line whose book vanished, the very action FR-11 tells them to
+ * take; and a positive quantity naming no line is a 404 {@link
+ * CartLineNotFoundException} answered <em>locally, before the network hop</em>
+ * — changing a line that does not exist is a client bug regardless of what
+ * stock says, and a catalog-first check would launder the vanished-book state
+ * into a second, wrong 404 (ADR-005's absence rule). For a positive update the
+ * live {@code findBook} bound then gates the write exactly like {@link #add}'s
+ * stock gate does (LC-12, LC-16): above stock is a 422 carrying {@code
+ * availableStock} with nothing written, equality (quantity == stock — the line
+ * LC-30 does not flag) passes, and a vanished book propagates as the decoder's
+ * 404. The line is re-loaded inside the write unit — the same {@link
+ * TransactionOperations} posture as the other flows, no unit ever spanning the
+ * Feign hop — so a concurrent removal from another session dies as the honest
+ * 404 here instead of resurrecting the line through a merge of stale state,
+ * and a concurrent <em>set</em> is last-write-wins by definition: FR-12 names
+ * no order between two explicit user intents. The response is the full {@link
+ * #read} view after the change (plan §2: 200 CartResponse), so totals
+ * recalculate live and the client never re-fetches to see the effect.
  */
 @Service
 public class CartServiceImpl implements CartService {
@@ -179,6 +205,37 @@ public class CartServiceImpl implements CartService {
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
                 .setScale(2);
         return new CartResponse(items, total, CURRENCY_EUR);
+    }
+
+    @Override
+    public CartResponse update(UUID userId, UUID bookId, int quantity) {
+        if (quantity == 0) {
+            // FR-12's explicit removal: a delete, never a stored zero (ADR-004's
+            // CHECK makes zero unrepresentable). No east-west lookup — a removal
+            // needs no stock bound, and this is what keeps an LC-14 line whose
+            // book vanished removable at all. Absent line/cart: the requested
+            // state already holds (FR-13's idempotence), still a 200 read view.
+            removeLine(userId, bookId);
+            return read(userId);
+        }
+        // A positive quantity changes a line that must exist, and that answer is
+        // local and precedes the network: no line → 404 regardless of stock
+        // (creation is add's job, FR-10). Then the live bound gates the write
+        // exactly like add's gate does (LC-12, LC-16): ADR-005's vanished book
+        // propagates as book-not-found, an unreachable catalog as a 503-class
+        // transport error — never as a fabricated acceptance or a stored row.
+        requireLine(userId, bookId);
+        int stock = catalogClient.findBook(bookId).stockQuantity();
+        if (quantity < 0 || quantity > stock) {
+            // quantity < 0 is the defensive re-check of the boundary's @Min(0)
+            // (C23, LC-16) — an update names its result, so no out-of-range
+            // value is ever accepted, not even capped.
+            log.debug("Cart update rejected for user {} (book {}, requested {}, available {})",
+                    userId, bookId, quantity, stock);
+            throw InsufficientStockException.forStock(stock);
+        }
+        setLineQuantity(userId, bookId, quantity);
+        return read(userId);
     }
 
     /**
@@ -287,5 +344,58 @@ public class CartServiceImpl implements CartService {
                 return cartItemRepository.save(winnerLine);
             });
         }
+    }
+
+    /**
+     * FR-12's existence precondition, read as one consistent cart-and-lines
+     * snapshot (the same unit shape {@link #read} uses): a positive quantity
+     * addresses a line, and no network hop runs until the local answer says it
+     * exists — the 404 for a line that was never there cannot depend on what
+     * catalog happens to stock, and never depends on whether it answers at all.
+     */
+    private void requireLine(UUID userId, UUID bookId) {
+        transactionOperations.execute(tx -> cartRepository.findByUserId(userId)
+                .flatMap(cart -> cartItemRepository.findByCartIdAndBookId(cart.getId(), bookId))
+                .orElseThrow(() -> CartLineNotFoundException.forBookId(bookId)));
+    }
+
+    /**
+     * The FR-12 set inside one transaction unit that re-reads the line rather
+     * than merging the earlier detached copy: a line concurrently removed (the
+     * other session's OR-09 DELETE is exactly this race) dies here as the same
+     * honest 404 instead of being resurrected from stale state. No unique
+     * constraint is at stake — the row already exists, its {@code
+     * uk_cart_items_cart_book} identity is what was loaded — so unlike {@link
+     * #upsertLine} there is no insert race to recover from, and unlike FR-10's
+     * sum the requested quantity is applied verbatim: a set is idempotent by
+     * construction, twice the same intent, the same line.
+     */
+    private void setLineQuantity(UUID userId, UUID bookId, int quantity) {
+        transactionOperations.execute(tx -> {
+            CartItem line = cartRepository.findByUserId(userId)
+                    .flatMap(cart -> cartItemRepository.findByCartIdAndBookId(cart.getId(), bookId))
+                    .orElseThrow(() -> CartLineNotFoundException.forBookId(bookId));
+            line.setQuantity(quantity);
+            return cartItemRepository.save(line);
+        });
+    }
+
+    /**
+     * FR-12's zero branch: delete the addressed line when present, in one unit
+     * (ADR-004 — the schema has no zero row to write). Absent cart or absent
+     * line is a no-op, never an error: the requested state is the current one,
+     * the idempotence FR-13 spells for DELETE lives here for the set-to-zero
+     * route too. The {@code cart_items} row's deletion is the whole of the
+     * user's intent — the cart row itself survives (ADR-004: carts are never
+     * purged in the MVP), so a later add reuses it.
+     */
+    private void removeLine(UUID userId, UUID bookId) {
+        transactionOperations.execute(tx -> cartRepository.findByUserId(userId)
+                .flatMap(cart -> cartItemRepository.findByCartIdAndBookId(cart.getId(), bookId))
+                .map(line -> {
+                    cartItemRepository.delete(line);
+                    return line;
+                })
+                .orElse(null));
     }
 }

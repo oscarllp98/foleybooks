@@ -4,7 +4,7 @@ import com.foleybooks.order.cart.api.CartResponse;
 import java.util.UUID;
 
 /**
- * Both halves of the cart behind {@code /api/v1/cart} (FR-10..FR-13). The cart
+ * The cart operations behind {@code /api/v1/cart} (FR-10..FR-13). The cart
  * is the only state order-service owns (ADR-004): what is stored here is
  * <em>intent</em> — "this user wants N of this book" — never product data,
  * because price, stock and identity live in {@code catalog_db} and are read
@@ -54,4 +54,42 @@ public interface CartService {
      *         {@code total} over the unflagged lines only, currency {@code EUR}
      */
     CartResponse read(UUID userId);
+
+    /**
+     * Change the quantity of the user's line for {@code bookId} to exactly
+     * {@code quantity} (FR-12) — a <b>set</b>, not FR-10's sum: the caller names
+     * the resulting state, so applying this twice cannot drift the line the way
+     * repeated adds would. The live stock gate is FR-12's half of LC-12: a
+     * positive quantity above what catalog currently has answers 422 with the
+     * bound and writes nothing; the equality case (quantity == stock) is the
+     * boundary LC-30 does <em>not</em> flag, and it passes.
+     *
+     * <p>The special zero is the explicit removal — "setting quantity to 0
+     * explicitly removes the line" (FR-12) — and it is a delete, never a stored
+     * zero: {@code ck_cart_items_quantity} makes zero unrepresentable at rest
+     * (ADR-004). Removal addresses no stock bound (0 units can never exceed
+     * anything) and no live book either, so it deliberately skips the east-west
+     * lookup: clearing an LC-14 line whose book vanished is exactly the action
+     * FR-11 tells the user to take, and a mandatory lookup would answer it 404
+     * (ADR-005). Removing an absent line is the idempotent success FR-13
+     * promises for DELETE — the requested state already holds — not an error.
+     *
+     * <p>A positive quantity naming a line the cart does not hold answers 404
+     * {@code cart-line-not-found}: FR-12 changes "a line's" quantity and never
+     * creates one (creation is {@link #add}), and the answer is local — the
+     * stock of a book with no line to restock is nobody's business rule
+     * (ADR-010 fixes this and the branch order).
+     *
+     * @param userId   owner taken from the validated token's {@code sub} claim
+     * @param bookId   catalog public identifier of the book whose line changes
+     * @param quantity resulting quantity: 0 removes, 1..stock sets, negative is
+     *                 a boundary rejection (LC-16) re-checked defensively here
+     * @return the full cart after the change — the same FR-11 read view, flags
+     *         and server-computed total included (plan §2: 200 CartResponse)
+     * @throws CartLineNotFoundException   if a positive quantity addresses no line
+     * @throws BookNotFoundException       if a positive quantity addresses a line
+     *                                      whose book catalog no longer has
+     * @throws InsufficientStockException  if the quantity exceeds live stock
+     */
+    CartResponse update(UUID userId, UUID bookId, int quantity);
 }
