@@ -1,10 +1,10 @@
 import axios, { type AxiosError } from 'axios'
+import type { TokenPair } from '../types/auth'
 import {
-  clearTokens,
   getAccessToken,
   getRefreshToken,
+  markSessionExpired,
   setTokens,
-  type AuthTokens,
 } from './tokens'
 
 declare module 'axios' {
@@ -25,16 +25,21 @@ const LOGIN_PATH = '/login'
 
 export const http = axios.create({ baseURL: BASE_URL })
 
-type SessionExpiredHandler = () => void
+export type SessionExpiredHandler = () => void
 
 let sessionExpiredHandler: SessionExpiredHandler | null = null
 
 // LC-07: a failed refresh ends the session. The router layer (FE-10) wires
 // this to a client-side navigation; without a handler we hard-redirect.
+// Returns the previously installed handler so a later installer (FE-04's
+// AuthContext, then FE-10's router) can chain instead of silently dropping
+// the earlier one — the slot stays single, composition happens by chaining.
 export function setSessionExpiredHandler(
   handler: SessionExpiredHandler | null,
-): void {
+): SessionExpiredHandler | null {
+  const previous = sessionExpiredHandler
   sessionExpiredHandler = handler
+  return previous
 }
 
 http.interceptors.request.use((config) => {
@@ -58,21 +63,25 @@ http.interceptors.response.use(
       return Promise.reject(error)
     }
     config.authRetryAttempted = true
-    const accessToken = await refreshSession()
-    if (accessToken === null) {
-      onSessionExpired()
+    const session = await refreshSession()
+    if (session === null) {
+      // A null session means the refresh credential is gone: performRefresh
+      // has already ended the session and fired the handler (LC-07).
       return Promise.reject(error)
     }
-    config.headers.set('Authorization', `Bearer ${accessToken}`)
+    config.headers.set('Authorization', `Bearer ${session.accessToken}`)
     return http.request(config)
   },
 )
 
-let refreshPromise: Promise<string | null> | null = null
+let refreshPromise: Promise<TokenPair | null> | null = null
 
 // LC-22: concurrent 401s share a single in-flight refresh, so the client
 // never rotates twice from the same credential (a lost race = reuse).
-function refreshSession(): Promise<string | null> {
+// FE-04: this is the ONE refresh path — the AuthContext calls it rather than
+// rotating the credential itself, and it returns the full TokenPair so the
+// session identity can be restored after a transparent refresh (FR-04).
+export function refreshSession(): Promise<TokenPair | null> {
   if (!refreshPromise) {
     refreshPromise = performRefresh().finally(() => {
       refreshPromise = null
@@ -81,24 +90,27 @@ function refreshSession(): Promise<string | null> {
   return refreshPromise
 }
 
-async function performRefresh(): Promise<string | null> {
+async function performRefresh(): Promise<TokenPair | null> {
   const refreshToken = getRefreshToken()
   if (refreshToken === null) return null
   try {
-    const response = await http.post<AuthTokens>(
+    const response = await http.post<TokenPair>(
       REFRESH_PATH,
       { refreshToken },
       { skipAuthRefresh: true },
     )
     setTokens(response.data)
-    return response.data.accessToken
+    return response.data
   } catch {
+    // LC-07: the credential was rejected — end the session here, the single
+    // failure door shared by the 401 interceptor and AuthContext.refresh().
+    onSessionExpired()
     return null
   }
 }
 
 function onSessionExpired(): void {
-  clearTokens()
+  markSessionExpired()
   if (sessionExpiredHandler) {
     sessionExpiredHandler()
   } else {

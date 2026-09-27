@@ -7,6 +7,8 @@ Accepted — records the decisions FE-01 delivered for `frontend/src/lib/`
 recovered from, and how a lost session ends. Binding for FE-03 (api/ clients
 must reuse the instance), FE-04 (AuthContext must wrap this store, not
 parallel it) and FE-10 (router must wire the session-expired handler).
+Amended by ADR-012, which settles how FE-04 wraps the store (observability,
+identity snapshot, handler chaining) without changing the decisions below.
 
 ## Context
 

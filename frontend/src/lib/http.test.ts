@@ -16,7 +16,6 @@ type Handler = (config: InternalAxiosRequestConfig) => AxiosResponse
 
 let calls: InternalAxiosRequestConfig[]
 let handler: Handler
-
 function respond(
   config: InternalAxiosRequestConfig,
   status: number,

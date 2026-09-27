@@ -17,10 +17,11 @@ import type {
 // already flags /auth/ paths to skip the refresh flow (LC-22), so a failed
 // login rejects straight to the caller instead of looping.
 //
-// POST /auth/refresh is deliberately NOT mirrored here: transparent session
-// refresh is the interceptor's internal single-flight path (lib/http.ts
-// performRefresh, LC-07/LC-22), never a UI-invoked call, so a public client
-// would only offer a second, uncoordinated way to rotate the credential (C1).
+// POST /auth/refresh is deliberately NOT mirrored here: the ONE rotation door
+// is lib/http.ts refreshSession() (performRefresh's single-flight path,
+// LC-07/LC-22), shared by the 401 interceptor and — per ADR-012 — by
+// useAuth().refresh(). A public client here would only offer a second,
+// uncoordinated way to rotate the credential (C1).
 
 const BASE_PATH = '/auth'
 
