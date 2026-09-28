@@ -8,7 +8,8 @@ session state is persisted, and how the single session-expired handler slot is
 composed between FE-04 and FE-10. Binding for FE-09 (header renders from
 `useAuth`), FE-10 (router guard reads `isAuthenticated`/`sessionExpired` and
 installs its navigation handler) and FE-14/FE-15 (anonymous-vs-authenticated
-UI decisions read the same context).
+UI decisions read the same context). Amended once more at FE-06 — see the
+Amendment section below on auth command mutations vs TanStack Query.
 
 ## Context
 
@@ -103,6 +104,18 @@ Building the context surfaced three questions ADR-011 left open:
 - No new dependency was added (C2); C10's "only api/ calls HTTP" is
   untouched — the context calls `api/auth`, and `refresh()` delegates to
   the interceptor's internal path, which was already part of `lib/`'s job.
+
+## Amendment (FE-06): auth command mutations stay outside TanStack Query
+
+Plan §5 D-13's "TanStack Query v5 everywhere" is read as governing *server
+state*: queries and the mutations whose results live in that cache (catalog
+lists, cart — FE-11..FE-15 through `hooks/`). One-shot auth command
+endpoints (register/confirm/resend/login/logout) produce session or mail
+side effects, not cacheable resources; they call `api/auth` directly —
+`AuthProvider.login`/`logout` set that precedent in this ADR's own decision,
+and FE-06's `RegisterForm` follows it. Documented so the later form tasks
+(FE-07/FE-08) converge on the same pattern instead of re-debating it.
+C10 is untouched: forms still never touch `lib/http.ts` — only `api/auth`.
 
 ## References
 
