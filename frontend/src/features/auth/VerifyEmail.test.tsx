@@ -5,6 +5,7 @@ import {
 } from 'axios'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { VerifyEmail } from './VerifyEmail'
 import { http } from '../../lib/http'
@@ -78,17 +79,24 @@ function installStub(responder: Responder): SentRequest[] {
   return sent
 }
 
-function openConfirmationLink(token: string | null = TOKEN): void {
-  window.history.replaceState(
-    null,
-    '',
-    token === null ? '/verify-email' : `/verify-email?token=${token}`,
+// FE-10 mounted /verify-email in the route table and the success CTA became
+// a <Link>, so the page renders inside a router now — as in production. The
+// D-01 token rides the router's own URL: initialEntries carries ?token=…,
+// which is exactly what the page reads through useSearchParams.
+function renderVerifyEmail(token: string | null = TOKEN): void {
+  render(
+    <MemoryRouter
+      initialEntries={[
+        token === null ? '/verify-email' : `/verify-email?token=${token}`,
+      ]}
+    >
+      <VerifyEmail />
+    </MemoryRouter>,
   )
 }
 
 beforeEach(() => {
   clearTokens()
-  openConfirmationLink()
 })
 
 describe('VerifyEmail', () => {
@@ -96,7 +104,7 @@ describe('VerifyEmail', () => {
     // FR-02/D-01: the page POSTs the query token — it never renders (C24) —
     // and a live link verifies the account with the server's success copy.
     const sent = installStub(() => [200, CONFIRMED_BODY])
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     expect(await screen.findByText('Email confirmed')).toBeInTheDocument()
     expect(
@@ -117,7 +125,7 @@ describe('VerifyEmail', () => {
     // LC-03/LC-23: re-opening a spent link is a success, not an error — the
     // outcome discriminator picks the "already confirmed" heading.
     installStub(() => [200, ALREADY_CONFIRMED_BODY])
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     expect(await screen.findByText('Already confirmed')).toBeInTheDocument()
     expect(
@@ -134,7 +142,7 @@ describe('VerifyEmail', () => {
     // resend panel; the machine-readable resendHint (an API pointer, not
     // user copy) never leaks to the screen.
     installStub(() => [410, EXPIRED_410_BODY])
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     expect(
       await screen.findByText('Confirmation link is not valid'),
@@ -157,8 +165,7 @@ describe('VerifyEmail', () => {
     // An empty token fails the zod mirror before the network: there is no
     // useful POST, and the invalid-link state covers it (LC-02's recovery).
     const sent = installStub(() => [200, CONFIRMED_BODY])
-    openConfirmationLink(null)
-    render(<VerifyEmail />)
+    renderVerifyEmail(null)
 
     expect(
       await screen.findByText('Confirmation link is not valid'),
@@ -176,7 +183,7 @@ describe('VerifyEmail', () => {
         settle = (response) => resolve(response)
       })
     }
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Confirming your email…',
@@ -211,7 +218,7 @@ describe('VerifyEmail', () => {
           ]
         : [200, CONFIRMED_BODY]
     })
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(
@@ -235,7 +242,7 @@ describe('VerifyEmail', () => {
         : [202, RESEND_GENERIC_202],
     )
     const user = userEvent.setup()
-    render(<VerifyEmail />)
+    renderVerifyEmail()
 
     await screen.findByText('Confirmation link is not valid')
     await user.type(screen.getByLabelText('Email'), ' Reader@Example.com ')

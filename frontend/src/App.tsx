@@ -1,11 +1,15 @@
+import { BrowserRouter } from 'react-router'
+import { AppRoutes } from './routes/AppRoutes'
+
+// FE-10: the app is now the routed shell. AuthProvider stays above the
+// router in main.tsx (ADR-012), so Layout's session-expired handler installs
+// inside the provider and the chain order holds (children-first effects).
+
 function App() {
   return (
-    <main className="mx-auto flex min-h-screen max-w-5xl flex-col items-center justify-center gap-2 p-8">
-      <h1 className="text-3xl font-bold tracking-tight">Foley Books</h1>
-      <p className="text-neutral-600">
-        Your next favourite story is a search away.
-      </p>
-    </main>
+    <BrowserRouter>
+      <AppRoutes />
+    </BrowserRouter>
   )
 }
 

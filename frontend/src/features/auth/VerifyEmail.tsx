@@ -1,5 +1,6 @@
 import { isAxiosError } from 'axios'
 import { useEffect, useState } from 'react'
+import { Link, useSearchParams } from 'react-router'
 import { confirm } from '../../api/auth'
 import { ErrorState } from '../../components/ErrorState'
 import { Spinner } from '../../components/Spinner'
@@ -35,15 +36,15 @@ const INVALID_LINK_FALLBACK =
   'This confirmation link is not valid or has expired. You can request a new one.'
 const GENERIC_FAILURE = 'We could not confirm your email. Please try again.'
 
-// D-01's link target is a real URL, so reading window.location.search works
-// both today and once FE-10 mounts this page under React Router (client-side
-// navigation updates window.location too). No speculative prop (C1).
-function tokenFromUrl(): string {
-  return new URLSearchParams(window.location.search).get('token') ?? ''
-}
+// D-01's link target is a real URL, and FE-10 mounted this page at
+// /verify-email in the route table — so the token arrives through the
+// router's own search params. Reading window.location directly would
+// duplicate the router's authority over the URL (it only updates there
+// under BrowserRouter, not in a MemoryRouter). No speculative prop (C1).
 
 export function VerifyEmail() {
-  const presentedToken = tokenFromUrl()
+  const [searchParams] = useSearchParams()
+  const presentedToken = searchParams.get('token') ?? ''
   const tokenIsValid = confirmRequestSchema.safeParse({
     token: presentedToken,
   }).success
@@ -124,15 +125,15 @@ function Success({ title, message }: { title: string; message: string }) {
         {title}
       </h2>
       <p className="text-sm text-emerald-700">{message}</p>
-      {/* Pre-router transitional CTA, same convention as lib/http.ts LOGIN_PATH
-          and ADR-012's pre-router hard redirect: a plain <a> works standalone
-          today and is swapped for a <Link> when FE-10 mounts the routes. */}
-      <a
-        href="/login"
+      {/* FE-10 mounted the route table (D-01), so this CTA navigates
+          client-side now — the transitional hard <a> is retired, exactly as
+          its original comment anticipated. */}
+      <Link
+        to="/login"
         className="mt-1 self-start rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-700"
       >
         Go to login
-      </a>
+      </Link>
     </section>
   )
 }
