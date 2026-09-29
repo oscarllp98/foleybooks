@@ -97,7 +97,12 @@ export function ResendConfirmation() {
   }
 
   return (
-    <form onSubmit={onSubmit} noValidate className="flex flex-col gap-4">
+    <form
+      onSubmit={onSubmit}
+      noValidate
+      aria-label="Request a new confirmation link"
+      className="flex flex-col gap-4"
+    >
       <h2 className="text-lg font-semibold text-neutral-900">
         Request a new confirmation link
       </h2>
