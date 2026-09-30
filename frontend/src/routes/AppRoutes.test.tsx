@@ -3,6 +3,7 @@ import {
   type AxiosResponse,
   type InternalAxiosRequestConfig,
 } from 'axios'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
@@ -35,6 +36,18 @@ const TOKEN_PAIR = {
 
 const EXPIRED_NOTICE = 'Your session has expired'
 
+const CLEAN_CODE = {
+  id: '00000000-0000-0000-0000-00000000cb06',
+  title: 'Clean Code',
+  author: 'Robert C. Martin',
+  isbn: '9780132350884',
+  price: 31.99,
+  coverUrl: 'https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg',
+  availability: 'IN_STOCK',
+  stockQuantity: 12,
+  category: { id: 'cat-1', name: 'Technology' },
+} as const
+
 function installStub(responder: Responder): SentRequest[] {
   const sent: SentRequest[] = []
   http.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -63,11 +76,19 @@ function installStub(responder: Responder): SentRequest[] {
 }
 
 function renderRoute(path: string): void {
+  // FE-11 mounted the query-driven BookList at "/" and FE-13 mounted the
+  // query-driven BookDetail at "/books/:id", so the harness now wraps the
+  // table in a fresh no-retry QueryClient — the same shape App.tsx uses.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
   render(
     <AuthProvider>
-      <MemoryRouter initialEntries={[path]}>
-        <AppRoutes />
-      </MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[path]}>
+          <AppRoutes />
+        </MemoryRouter>
+      </QueryClientProvider>
     </AuthProvider>,
   )
 }
@@ -216,5 +237,20 @@ describe('Route table', () => {
     expect(
       await screen.findByText('Confirmation link is not valid'),
     ).toBeInTheDocument()
+  })
+
+  it('routeTable_whenBookDetailPath_rendersBookDetail', async () => {
+    // FE-13 mounted the FR-07 slot: the /books/:id path BookList navigates
+    // to now resolves to a real page that fetches the book by its UUID.
+    installStub((url) =>
+      url.startsWith('/books/') ? [200, CLEAN_CODE] : [404, {}],
+    )
+    renderRoute(`/books/${CLEAN_CODE.id}`)
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Clean Code' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('9780132350884')).toBeInTheDocument()
+    expect(screen.getByText('In stock')).toBeInTheDocument()
   })
 })

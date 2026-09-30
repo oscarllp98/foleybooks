@@ -206,8 +206,9 @@ export function BookList() {
             <li key={book.id}>
               <BookCard
                 book={book}
-                // FR-07 reachability: the /books/:id slot mounts in FE-13;
-                // the list's job is only to hand the public UUID over.
+                // FR-07 reachability: FE-13 mounted the /books/:id
+                // detail route; the list's job is only to hand the
+                // public UUID over.
                 onOpen={(opened) => {
                   navigate(`/books/${opened.id}`)
                 }}

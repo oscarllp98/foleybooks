@@ -10,6 +10,7 @@ import {
 import { Header } from '../features/auth/Header'
 import { VerifyEmail } from '../features/auth/VerifyEmail'
 import { CartPage } from '../features/cart/CartPage'
+import { BookDetail } from '../features/catalog/BookDetail'
 import { setSessionExpiredHandler } from '../lib/http'
 import { HomePage } from './HomePage'
 import { LoginPage } from './LoginPage'
@@ -19,7 +20,9 @@ import { RequireAuth, type LoginRedirectState } from './RequireAuth'
 // FE-10: the React Router v7 route table. The paths are the ones the
 // committed code already promises: "/" (home), "/login", "/register"
 // (user-approved, FE-09) and "/verify-email?token=…" (plan D-01), plus the
-// guarded "/cart". FE-11..FE-15 mount their pages into these slots.
+// guarded "/cart". FE-11 mounted the browse page at "/"; FE-13 mounts the
+// FR-07 detail slot at "/books/:id" — the exact path the list cards
+// navigate to. FE-14/FE-15 fill the remaining slots.
 
 /**
  * App shell: header + routed main. Also the router mount point ADR-011
@@ -70,6 +73,7 @@ export function AppRoutes() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<HomePage />} />
+        <Route path="books/:id" element={<BookDetail />} />
         <Route path="login" element={<LoginPage />} />
         <Route path="register" element={<RegisterPage />} />
         <Route path="verify-email" element={<VerifyEmail />} />
