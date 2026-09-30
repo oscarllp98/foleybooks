@@ -4,7 +4,12 @@ import {
   type InternalAxiosRequestConfig,
 } from 'axios'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import {
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router'
 import { describe, expect, it } from 'vitest'
@@ -12,10 +17,17 @@ import { BookList } from './BookList'
 import { http } from '../../lib/http'
 import { formatEur } from '../../lib/money'
 
-// FE-11 tests (FR-06, NFR-03): the browse page driven over the real shared
-// axios instance through a stubbed adapter — the same seam AppRoutes.test.tsx
-// uses — with a fresh no-retry QueryClient per render so the pending, settled
-// and failed query states are the component's own, not the client's retries.
+// FE-11 + FE-12 tests (FR-06, FR-08, FR-09, NFR-03, LC-10, LC-31): the browse
+// page driven over the real shared axios instance through a stubbed adapter —
+// the same seam AppRoutes.test.tsx uses — with a fresh no-retry QueryClient
+// per render so the pending, settled and failed query states are the
+// component's own, not the client's retries.
+//
+// FE-12 adds a second resource to the page (GET /categories for the filter),
+// so a responder now receives the whole request, not just a call index:
+// booksResponder() answers categories from a fixture and numbers only the
+// /books calls, which keeps the index-based expectations of the FE-11 tests
+// meaningful and the request-shape assertions exact.
 
 interface SentRequest {
   url: string
@@ -23,7 +35,7 @@ interface SentRequest {
 }
 
 type Response = [number, unknown] | Promise<[number, unknown]>
-type Responder = (requestIndex: number) => Response
+type Responder = (request: SentRequest) => Response
 
 const CLEAN_CODE = {
   id: '00000000-0000-0000-0000-00000000cb06',
@@ -81,14 +93,52 @@ const EMPTY_PAGE = {
   page: { totalElements: 0, totalPages: 0, number: 0, size: 20 },
 } as const
 
-function installStub(responder: Responder): SentRequest[] {
-  const sent: SentRequest[] = []
+const CATEGORIES_PAGE = {
+  content: [
+    { id: 'cat-2', name: 'Fiction' },
+    { id: 'cat-1', name: 'Technology' },
+  ],
+  page: { totalElements: 2, totalPages: 1, number: 0, size: 100 },
+} as const
+
+const EMPTY_CATEGORIES_PAGE = {
+  content: [],
+  page: { totalElements: 0, totalPages: 0, number: 0, size: 100 },
+} as const
+
+/** Answers /categories from the fixture and delegates everything else, so a
+ *  test can count only the book requests its expectations are about. */
+function booksResponder(
+  handler: (bookRequestIndex: number) => Response,
+): Responder {
+  let bookRequests = 0
+  return (request) =>
+    request.url === '/categories'
+      ? [200, CATEGORIES_PAGE]
+      : handler(bookRequests++)
+}
+
+/** Renders the live route path, so FR-07's wiring is pinned through visible
+ *  location state rather than component internals (constitution #11). */
+function RouteProbe() {
+  const { pathname } = useLocation()
+  return <p>route: {pathname}</p>
+}
+
+function renderBookList(
+  responder: Responder,
+  initialEntry = '/',
+): SentRequest[] {
+  const books: SentRequest[] = []
   http.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
-    sent.push({
+    const request: SentRequest = {
       url: config.url ?? '',
       params: (config.params ?? {}) as Record<string, unknown>,
-    })
-    const [status, data] = await responder(sent.length - 1)
+    }
+    if (request.url === '/books') {
+      books.push(request)
+    }
+    const [status, data] = await responder(request)
     const response: AxiosResponse = {
       status,
       statusText: '',
@@ -107,30 +157,18 @@ function installStub(responder: Responder): SentRequest[] {
     }
     return response
   }
-  return sent
-}
-
-/** Renders the live route path, so FR-07's wiring is pinned through visible
- *  location state rather than component internals (constitution #11). */
-function RouteProbe() {
-  const { pathname } = useLocation()
-  return <p>route: {pathname}</p>
-}
-
-function renderBookList(responder: Responder): SentRequest[] {
-  const requests = installStub(responder)
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/']}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <BookList />
         <RouteProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   )
-  return requests
+  return books
 }
 
 describe('BookList', () => {
@@ -139,7 +177,7 @@ describe('BookList', () => {
     // card (FR-14-style envelope from api/catalog), the sort control starts at
     // the server default (title asc), and the result summary comes from the
     // page envelope. Only the whitelisted sort grammar is selectable (CA-07).
-    const requests = renderBookList(() => [200, PAGE_ONE])
+    const requests = renderBookList(booksResponder(() => [200, PAGE_ONE]))
 
     expect(
       screen.getByRole('heading', { name: 'Browse books' }),
@@ -167,10 +205,12 @@ describe('BookList', () => {
     // replaces it — the grid is never a silent blank page.
     let settle: ((pair: [number, unknown]) => void) | undefined
     renderBookList(
-      () =>
-        new Promise<[number, unknown]>((resolve) => {
-          settle = resolve
-        }),
+      booksResponder(
+        () =>
+          new Promise<[number, unknown]>((resolve) => {
+            settle = resolve
+          }),
+      ),
     )
 
     expect(await screen.findByRole('status')).toHaveTextContent('Loading books')
@@ -187,12 +227,14 @@ describe('BookList', () => {
     // the spinner (keepPreviousData), and the new page replaces it on arrival.
     const user = userEvent.setup()
     let settle: ((pair: [number, unknown]) => void) | undefined
-    const requests = renderBookList((index) =>
-      index === 0
-        ? [200, PAGE_ONE]
-        : new Promise<[number, unknown]>((resolve) => {
-            settle = resolve
-          }),
+    const requests = renderBookList(
+      booksResponder((index) =>
+        index === 0
+          ? [200, PAGE_ONE]
+          : new Promise<[number, unknown]>((resolve) => {
+              settle = resolve
+            }),
+      ),
     )
     await screen.findByText('Clean Code')
 
@@ -219,12 +261,14 @@ describe('BookList', () => {
     // 0 with the whitelisted 'price,desc' — the request, not just the select,
     // proves the URL state is what drives the fetch.
     const user = userEvent.setup()
-    const requests = renderBookList((index) =>
-      index === 0
-        ? [200, PAGE_ONE]
-        : index === 1
-          ? [200, PAGE_TWO]
-          : [200, PAGE_ONE],
+    const requests = renderBookList(
+      booksResponder((index) =>
+        index === 0
+          ? [200, PAGE_ONE]
+          : index === 1
+            ? [200, PAGE_TWO]
+            : [200, PAGE_ONE],
+      ),
     )
     await screen.findByText('Clean Code')
     await user.click(screen.getByRole('button', { name: 'Next page' }))
@@ -245,7 +289,7 @@ describe('BookList', () => {
   it('bookList_whenCatalogEmpty_showsEmptyStateNotError', async () => {
     // FR-06 "each list state has an empty state": a settled page with nothing
     // in it is a message, never an alert.
-    renderBookList(() => [200, EMPTY_PAGE])
+    renderBookList(booksResponder(() => [200, EMPTY_PAGE]))
 
     expect(
       await screen.findByRole('region', { name: 'No books yet' }),
@@ -254,7 +298,7 @@ describe('BookList', () => {
   })
 
   it('pagination_whenResultFitsOnePage_rendersNoPaginationControls', async () => {
-    renderBookList(() => [200, SINGLE_PAGE])
+    renderBookList(booksResponder(() => [200, SINGLE_PAGE]))
 
     await screen.findByText('Clean Code')
     expect(screen.queryByRole('navigation', { name: 'Pagination' })).toBeNull()
@@ -263,16 +307,18 @@ describe('BookList', () => {
   it('bookList_whenServerFails_showsErrorStateWithProblemTraceId', async () => {
     // NFR-03/NFR-06: the failure is a role="alert" state, generic copy plus
     // the ProblemDetail traceId — the gateway's 500 body, not a stack trace.
-    renderBookList(() => [
-      500,
-      {
-        type: 'urn:foley-books:problem:error',
-        title: 'Internal server error',
-        status: 500,
-        detail: 'Unexpected failure.',
-        traceId: 'f6a7b8c9',
-      },
-    ])
+    renderBookList(
+      booksResponder(() => [
+        500,
+        {
+          type: 'urn:foley-books:problem:error',
+          title: 'Internal server error',
+          status: 500,
+          detail: 'Unexpected failure.',
+          traceId: 'f6a7b8c9',
+        },
+      ]),
+    )
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('We could not load the books')
@@ -284,10 +330,12 @@ describe('BookList', () => {
     // NFR-03/NFR-04: recovery is a visible action, keyboard-reachable, and it
     // replays the same request through the query layer (refetch, not remount).
     const user = userEvent.setup()
-    const requests = renderBookList((index) =>
-      index === 0
-        ? [500, { status: 500, traceId: 'a1b2c3d4' }]
-        : [200, PAGE_ONE],
+    const requests = renderBookList(
+      booksResponder((index) =>
+        index === 0
+          ? [500, { status: 500, traceId: 'a1b2c3d4' }]
+          : [200, PAGE_ONE],
+      ),
     )
 
     const alert = await screen.findByRole('alert')
@@ -308,7 +356,7 @@ describe('BookList', () => {
     // the /books/:id slot FE-13 mounts. BookCard.test pins the onOpen
     // callback; only this page can pin the navigation it is wired to.
     const user = userEvent.setup()
-    renderBookList(() => [200, PAGE_ONE])
+    renderBookList(booksResponder(() => [200, PAGE_ONE]))
     await screen.findByText('Clean Code')
 
     await user.click(screen.getAllByRole('button', { name: 'View details' })[0])
@@ -316,5 +364,257 @@ describe('BookList', () => {
     expect(
       await screen.findByText(`route: /books/${CLEAN_CODE.id}`),
     ).toBeInTheDocument()
+  })
+
+  it('categories_whenFilterLoads_requestsOneMaxSizePageInServerOrder', async () => {
+    // FR-09: the filter's choices come from GET /categories in one read —
+    // the server's clamped max page size (D-07) covers the whole seeded list,
+    // in its name-ascending order (CA-10). The page never sorts options
+    // itself, so client and server cannot drift.
+    const categoryRequests: SentRequest[] = []
+    renderBookList((request) => {
+      if (request.url === '/categories') {
+        categoryRequests.push(request)
+        return [200, CATEGORIES_PAGE]
+      }
+      return [200, PAGE_ONE]
+    })
+
+    await screen.findByText('Clean Code')
+    await screen.findByRole('option', { name: 'Fiction' })
+    expect(categoryRequests).toHaveLength(1)
+    expect(categoryRequests[0]?.params).toEqual({ page: 0, size: 100 })
+    const optionValues = Array.from(
+      (screen.getByLabelText('Category') as HTMLSelectElement).options,
+    ).map((option) => option.value)
+    expect(optionValues).toEqual(['', 'cat-2', 'cat-1'])
+  })
+
+  it('search_whenSubmittedAfterBrowsing_sendsTrimmedTermAndRestartsAtFirstPage', async () => {
+    // FR-08: a submitted term goes out as the server's `search` parameter
+    // (trimmed at the UI, though CA-08 trims too), and narrowing the result
+    // set restarts browsing at page 0 instead of carrying an index from the
+    // unfiltered list. Typing alone sends nothing — only submit does.
+    const user = userEvent.setup()
+    const requests = renderBookList(
+      booksResponder((index) =>
+        index === 0
+          ? [200, PAGE_ONE]
+          : index === 1
+            ? [200, PAGE_TWO]
+            : [200, PAGE_ONE],
+      ),
+    )
+    await screen.findByText('Clean Code')
+    await user.click(screen.getByRole('button', { name: 'Next page' }))
+    await screen.findByText('Neuromancer')
+
+    await user.type(screen.getByLabelText('Search books'), '  gibson ')
+    expect(requests).toHaveLength(2)
+
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+
+    await screen.findByText('Clean Code')
+    expect(requests[2]?.params).toEqual({
+      page: 0,
+      sort: 'title,asc',
+      search: 'gibson',
+    })
+  })
+
+  it('search_whenSubmittedBlank_clearsTheFilterAndRequestsTheWholeCatalog', async () => {
+    // FR-08: submitting an empty box removes the search — the request omits
+    // the parameter entirely rather than sending ?search=, which is the
+    // server's own "no filter" spelling (CA-08).
+    const user = userEvent.setup()
+    const requests = renderBookList(
+      booksResponder(() => [200, PAGE_ONE]),
+      '/?search=gibson',
+    )
+
+    expect(
+      (await screen.findByLabelText('Search books')) as HTMLInputElement,
+    ).toHaveValue('gibson')
+    expect(requests[0].params).toEqual({
+      page: 0,
+      sort: 'title,asc',
+      search: 'gibson',
+    })
+
+    await user.clear(screen.getByLabelText('Search books'))
+    await user.click(screen.getByRole('button', { name: 'Search' }))
+
+    await waitFor(() =>
+      expect(requests[1]?.params).toEqual({ page: 0, sort: 'title,asc' }),
+    )
+  })
+
+  it('search_whenTypedPastTheServerCap_stopsAtTheMirroredMaxLength', async () => {
+    // AGENTS §2's mirror rule: BookController's @Size(max = 300) on `search`
+    // (CA-08, LC-28's long-query-string clause) lives on the input as
+    // maxLength, so a term longer than the server would ever evaluate simply
+    // cannot be typed — the browse UI can never walk a user into the
+    // validation-400 error page through the search box.
+    const user = userEvent.setup()
+    renderBookList(booksResponder(() => [200, PAGE_ONE]))
+
+    const input = (await screen.findByLabelText(
+      'Search books',
+    )) as HTMLInputElement
+    expect(input.maxLength).toBe(300)
+
+    await user.type(input, 'x'.repeat(301))
+    expect(input).toHaveValue('x'.repeat(300))
+  })
+
+  it('searchAndCategory_whenCombined_composeIntoOneQueryAndSortKeepsBoth', async () => {
+    // FR-08 + FR-09 (D-06): the two filters compose into a single request —
+    // changing one never drops the other — and a sort change keeps both while
+    // restarting at page 0.
+    const user = userEvent.setup()
+    const requests = renderBookList(
+      booksResponder(() => [200, PAGE_ONE]),
+      '/?search=gibson&page=1',
+    )
+    await screen.findByText('Clean Code')
+    expect(requests[0].params).toEqual({
+      page: 1,
+      sort: 'title,asc',
+      search: 'gibson',
+    })
+
+    await user.selectOptions(screen.getByLabelText('Category'), 'Fiction')
+    await waitFor(() =>
+      expect(requests[1]?.params).toEqual({
+        page: 0,
+        sort: 'title,asc',
+        search: 'gibson',
+        categoryId: 'cat-2',
+      }),
+    )
+
+    await user.selectOptions(
+      screen.getByLabelText('Sort by'),
+      'Price: low to high',
+    )
+    await waitFor(() =>
+      expect(requests[2]?.params).toEqual({
+        page: 0,
+        sort: 'price,asc',
+        search: 'gibson',
+        categoryId: 'cat-2',
+      }),
+    )
+  })
+
+  it('categoryFilter_whenAllCategoriesSelected_removesCategoryIdFromQuery', async () => {
+    // FR-09: "All categories" is the filter's off switch — the parameter is
+    // dropped, not sent blank, exactly like clearing the search box.
+    const user = userEvent.setup()
+    const requests = renderBookList(
+      booksResponder(() => [200, PAGE_ONE]),
+      '/?categoryId=cat-1',
+    )
+    await screen.findByText('Clean Code')
+    expect((screen.getByLabelText('Category') as HTMLSelectElement).value).toBe(
+      'cat-1',
+    )
+
+    await user.selectOptions(
+      screen.getByLabelText('Category'),
+      'All categories',
+    )
+
+    await waitFor(() =>
+      expect(requests[1]?.params).toEqual({ page: 0, sort: 'title,asc' }),
+    )
+  })
+
+  it('bookList_whenUrlCarriesEveryParam_restoresControlsAndSendsTheSameQuery', async () => {
+    // FR-08/FR-09 shareability: a saved link restores search, category, page
+    // and sort in both the visible controls and the first request — the URL
+    // is the single source of truth for browse state.
+    const requests = renderBookList(
+      booksResponder(() => [200, PAGE_ONE]),
+      '/?search=gibson&categoryId=cat-2&page=1&sort=price,desc',
+    )
+
+    await screen.findByText('Clean Code')
+    expect(
+      screen.getByLabelText('Search books') as HTMLInputElement,
+    ).toHaveValue('gibson')
+    expect((screen.getByLabelText('Category') as HTMLSelectElement).value).toBe(
+      'cat-2',
+    )
+    expect((screen.getByLabelText('Sort by') as HTMLSelectElement).value).toBe(
+      'price,desc',
+    )
+    expect(requests[0].params).toEqual({
+      page: 1,
+      sort: 'price,desc',
+      search: 'gibson',
+      categoryId: 'cat-2',
+    })
+  })
+
+  it('bookList_whenSearchMatchesNothing_showsEmptyResultStateNotError', async () => {
+    // LC-10: a LIKE-metacharacter term travels to the server as literal text
+    // and its no-match answer is the empty state naming the term — the same
+    // 200 page every other search gets, never an alert.
+    const requests = renderBookList(
+      booksResponder(() => [200, EMPTY_PAGE]),
+      '/?search=dune%25',
+    )
+
+    const empty = await screen.findByRole('region', {
+      name: 'No books match your search',
+    })
+    expect(empty).toHaveTextContent('dune%')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(requests[0].params).toEqual({
+      page: 0,
+      sort: 'title,asc',
+      search: 'dune%',
+    })
+  })
+
+  it('bookList_whenCategoryHasNoBooks_showsEmptyCategoryStateAndKeepsSelection', async () => {
+    // LC-31: a category that answers with zero books — here one the fetched
+    // list does not even carry — is a nothing-to-show state, and the select
+    // still reflects the URL-driven choice that produced it.
+    const requests = renderBookList(
+      booksResponder(() => [200, EMPTY_PAGE]),
+      '/?categoryId=cat-9',
+    )
+
+    expect(
+      await screen.findByRole('region', { name: 'No books in this category' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect((screen.getByLabelText('Category') as HTMLSelectElement).value).toBe(
+      'cat-9',
+    )
+    expect(requests[0].params).toEqual({
+      page: 0,
+      sort: 'title,asc',
+      categoryId: 'cat-9',
+    })
+  })
+
+  it('categoryFilter_whenCategoryListIsEmpty_degradesToAllCategoriesWithoutError', async () => {
+    // FR-09/LC-31: an empty category list is nothing-to-show for the filter
+    // too — just "All categories", no alert, and browsing the books is
+    // completely unaffected.
+    renderBookList((request) =>
+      request.url === '/categories'
+        ? [200, EMPTY_CATEGORIES_PAGE]
+        : [200, PAGE_ONE],
+    )
+
+    await screen.findByText('Clean Code')
+    const select = screen.getByLabelText('Category') as HTMLSelectElement
+    expect(select).toHaveValue('')
+    expect(select.options).toHaveLength(1)
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
