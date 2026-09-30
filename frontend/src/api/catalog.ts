@@ -8,7 +8,9 @@ import type { BookResponse, CategoryResponse, Page } from '../types/catalog'
 // the title/price sort whitelist (CA-07) and the categoryId/search filters
 // (CA-08) — are mirrored here only as the optional query shape; validating or
 // clamping is the server's, and the browse controls (FE-11/FE-12) decide what
-// to send. A malformed value simply surfaces as the server's 400 ProblemDetail.
+// to send. They send only whitelisted values — the CA-07 grammar as select
+// options and a non-negative integer page — so the malformed-parameter 400
+// stays a server-side safety net the UI itself never triggers.
 //
 // GET /books/batch is deliberately NOT mirrored here: it exists for the
 // order-service Feign client that enriches the cart server-side (CA-11, D-10),

@@ -10,7 +10,8 @@ interface SpinnerProps {
  * FE-05 (NFR-03): the shared loading state. The sr-only label carries
  * role="status" + aria-live so assistive tech reads it when a fetch starts
  * and settles, and visually hidden children (e.g. the stale list) stay laid
- * out beneath it.
+ * out beneath it — flagged out of the accessibility tree and made `inert`,
+ * so stale controls can never be focused or activated mid-fetch.
  */
 export function Spinner({ label = 'Loading', children }: SpinnerProps) {
   return (
@@ -25,7 +26,11 @@ export function Spinner({ label = 'Loading', children }: SpinnerProps) {
         </span>
       </div>
       {children ? (
-        <div aria-hidden="true" className="pointer-events-none opacity-50">
+        <div
+          aria-hidden="true"
+          inert
+          className="pointer-events-none opacity-50"
+        >
           {children}
         </div>
       ) : null}
