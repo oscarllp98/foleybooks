@@ -7,6 +7,7 @@ import { AvailabilityBadge } from '../../components/BookCard'
 import { EmptyState } from '../../components/EmptyState'
 import { ErrorState } from '../../components/ErrorState'
 import { Spinner } from '../../components/Spinner'
+import { AddToCartButton } from '../cart/AddToCartButton'
 import { formatEur } from '../../lib/money'
 import type { BookResponse } from '../../types/catalog'
 
@@ -27,6 +28,12 @@ import type { BookResponse } from '../../types/catalog'
 //
 // The cover keeps FE-05's D-11 pattern: a failed Open-Library hotlink swaps
 // to a styled placeholder that keeps the title as accessible text (LC-29).
+//
+// FE-14 mounts the FR-10 add-to-cart control under the metadata: signed-in
+// readers get the quantity selector plus the Add button, anonymous visitors
+// get the login prompt (plan §6.5 "BookDetail: ... add-to-cart; anonymous →
+// login prompt"). All of that behavior — and its tests — live in
+// AddToCartButton; this page only hosts it.
 
 /** The ProblemDetail properties this view can act on (D-15). */
 interface BookProblem {
@@ -125,6 +132,7 @@ function BookDetailView({ book }: { book: BookResponse }) {
               <AvailabilityBadge availability={book.availability} />
             </dd>
           </dl>
+          <AddToCartButton book={book} />
         </div>
       </div>
     </section>

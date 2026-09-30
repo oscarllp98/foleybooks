@@ -15,7 +15,8 @@ import { setSessionExpiredHandler } from '../lib/http'
 import { HomePage } from './HomePage'
 import { LoginPage } from './LoginPage'
 import { RegisterPage } from './RegisterPage'
-import { RequireAuth, type LoginRedirectState } from './RequireAuth'
+import { RequireAuth } from './RequireAuth'
+import type { LoginRedirectState } from '../types/routing'
 
 // FE-10: the React Router v7 route table. The paths are the ones the
 // committed code already promises: "/" (home), "/login", "/register"

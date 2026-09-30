@@ -1,7 +1,7 @@
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import { LoginForm } from '../features/auth/LoginForm'
 import { useAuth } from '../hooks/useAuth'
-import type { LoginRedirectState } from './RequireAuth'
+import type { LoginRedirectState } from '../types/routing'
 
 // FE-10 (FR-03, LC-07, LC-27): the /login page. It owns the two navigation
 // decisions the feature components refuse to make: where a successful login

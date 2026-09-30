@@ -7,15 +7,21 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BookDetail } from './BookDetail'
-import { http } from '../../lib/http'
+import { AuthProvider } from '../auth/AuthProvider'
+import { http, setSessionExpiredHandler } from '../../lib/http'
+import { clearTokens, setTokens } from '../../lib/tokens'
 import { formatEur } from '../../lib/money'
 
 // FE-13 tests (FR-07): the detail page over the real shared axios instance
 // through the same adapter stub as BookList.test — rendered inside a route
 // pattern so useParams sees the UUID the way the mounted table delivers it,
-// with a fresh no-retry QueryClient per render.
+// with a fresh no-retry QueryClient per render. FE-14 mounts the add-to-cart
+// control on this page, so the harness now includes the real AuthProvider
+// (main.tsx's shape): the control branches on the ONE session store, and
+// these tests only pin the two integration seams — signed-in readers get
+// the control, anonymous visitors get the login prompt.
 
 interface SentRequest {
   url: string
@@ -25,6 +31,12 @@ type Response = [number, unknown] | Promise<[number, unknown]>
 type Responder = (request: SentRequest) => Response
 
 const BOOK_ID = '00000000-0000-0000-0000-00000000cb06'
+
+const USER = {
+  id: 'u-1',
+  email: 'reader@example.com',
+  role: 'CUSTOMER',
+} as const
 
 const CLEAN_CODE = {
   id: BOOK_ID,
@@ -83,15 +95,17 @@ function renderBookDetail(
     defaultOptions: { queries: { retry: false } },
   })
   render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>
-          <Route path="/books/:id" element={<BookDetail />} />
-          <Route path="/" element={<p>browse landing</p>} />
-        </Routes>
-        <RouteProbe />
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <AuthProvider>
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[path]}>
+          <Routes>
+            <Route path="/books/:id" element={<BookDetail />} />
+            <Route path="/" element={<p>browse landing</p>} />
+          </Routes>
+          <RouteProbe />
+        </MemoryRouter>
+      </QueryClientProvider>
+    </AuthProvider>,
   )
   return requests
 }
@@ -102,6 +116,24 @@ function RouteProbe() {
   const { pathname } = useLocation()
   return <p>route: {pathname}</p>
 }
+
+function signIn(): void {
+  setTokens({
+    accessToken: 'access-1',
+    refreshToken: 'refresh-1',
+    user: USER,
+  })
+}
+
+beforeEach(() => {
+  // FE-14 seam: the detail page now hosts an auth-branching control, so the
+  // suite starts every test from the normalized anonymous store, like the
+  // Header/LoginForm suites.
+  setTokens({ accessToken: 'reset', refreshToken: 'reset' })
+  clearTokens()
+  setSessionExpiredHandler(null)
+  localStorage.clear()
+})
 
 describe('BookDetail', () => {
   it('bookDetail_whenBookArrives_rendersEveryFr07Field', async () => {
@@ -149,7 +181,9 @@ describe('BookDetail', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Clean Code' }),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('status')).toBeNull()
+    // The spinner — and only the spinner — is gone; the add-to-cart prompt
+    // legitimately carries its own status role (FE-14).
+    expect(screen.queryByText('Loading the book')).toBeNull()
   })
 
   it('availability_whenOutOfStock_rendersOutOfStockBadge', async () => {
@@ -248,5 +282,31 @@ describe('BookDetail', () => {
     })
     expect(placeholder).toHaveTextContent('Clean Code')
     expect(screen.getByText('9780132350884')).toBeInTheDocument()
+  })
+
+  it('bookDetail_whenSignedIn_mountsTheAddToCartControl', async () => {
+    // FE-14 seam (plan §6.5 "add-to-cart"): the detail page hosts the FR-10
+    // control with quantity selectable at add time, default 1, ceiling the
+    // book's stock. The control's own behavior is pinned by its suite.
+    signIn()
+    renderBookDetail(() => [200, CLEAN_CODE])
+    await screen.findByText('Clean Code')
+
+    expect(screen.getByRole('button', { name: 'Add to cart' })).toBeEnabled()
+    expect(screen.getByLabelText('Quantity')).toHaveValue(1)
+    expect(screen.getByLabelText('Quantity')).toHaveAttribute('max', '12')
+  })
+
+  it('bookDetail_whenAnonymous_showsLoginPromptInsteadOfAddControl', async () => {
+    // FE-14 seam (FR-10, LC-27): the page visitors reach without a session
+    // is exactly where the no-guest-cart prompt appears — offer to sign in,
+    // mount no add control.
+    renderBookDetail(() => [200, CLEAN_CODE])
+    await screen.findByText('Clean Code')
+
+    expect(
+      screen.getByRole('link', { name: 'Sign in to add to cart' }),
+    ).toHaveAttribute('href', '/login')
+    expect(screen.queryByRole('button', { name: 'Add to cart' })).toBeNull()
   })
 })

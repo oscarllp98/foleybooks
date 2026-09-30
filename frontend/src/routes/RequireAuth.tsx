@@ -1,12 +1,7 @@
 import type { ReactNode } from 'react'
 import { Navigate, useLocation } from 'react-router'
 import { useAuth } from '../hooks/useAuth'
-
-/** Router state LoginPage consumes to send the visitor back where they came from. */
-export interface LoginRedirectState {
-  /** Pathname to return to after a successful login (LC-27's return path). */
-  from: string
-}
+import type { LoginRedirectState } from '../types/routing'
 
 /**
  * FE-10 (FR-10, LC-27): guards a route element for signed-in users only.
@@ -15,7 +10,9 @@ export interface LoginRedirectState {
  * authentication so "after logging in, the cart is available" holds. The
  * auth decision itself is the session store's (ADR-012) — this component
  * reads it and nothing else; server-side it is still the resource server
- * that denies (C26, C22), never the guard.
+ * that denies (C26, C22), never the guard. The LoginRedirectState contract
+ * itself was hoisted to types/routing in the FE-14 audit (no features →
+ * routes edges).
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { isAuthenticated } = useAuth()
