@@ -7,6 +7,8 @@ interface QuantitySelectorProps {
   /** Live stock ceiling (FR-10/LC-12); omitted when stock is unknown yet. */
   max?: number
   label?: string
+  /** Blocks activation while a write is in flight (CartPage, FE-15). */
+  disabled?: boolean
 }
 
 function clamp(raw: number, min: number, max: number): number {
@@ -31,6 +33,7 @@ export function QuantitySelector({
   min = 1,
   max = 999,
   label = 'Quantity',
+  disabled = false,
 }: QuantitySelectorProps) {
   const [editing, setEditing] = useState(false)
   const [touched, setTouched] = useState(false)
@@ -51,7 +54,7 @@ export function QuantitySelector({
       <button
         type="button"
         aria-label={`Decrease ${label.toLowerCase()}`}
-        disabled={current <= min}
+        disabled={disabled || current <= min}
         onClick={() => commit(current - 1)}
         className="rounded-md border border-neutral-300 px-2.5 py-1 text-neutral-700 enabled:hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -63,6 +66,7 @@ export function QuantitySelector({
         inputMode="numeric"
         min={min}
         max={max}
+        disabled={disabled}
         value={display}
         onChange={(event) => {
           setDraft(event.target.value)
@@ -79,7 +83,7 @@ export function QuantitySelector({
       <button
         type="button"
         aria-label={`Increase ${label.toLowerCase()}`}
-        disabled={current >= max}
+        disabled={disabled || current >= max}
         onClick={() => commit(current + 1)}
         className="rounded-md border border-neutral-300 px-2.5 py-1 text-neutral-700 enabled:hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
       >

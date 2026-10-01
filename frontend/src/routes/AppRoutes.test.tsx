@@ -48,6 +48,16 @@ const CLEAN_CODE = {
   category: { id: 'cat-1', name: 'Technology' },
 } as const
 
+// The CartResponse a fresh account's GET /cart really answers (plan §2):
+// FE-15's page consumes contract-shaped data, so every stub for "/cart"
+// speaks the contract too — the component never patches up a malformed
+// body (C4: tests satisfy the contract, code implements it).
+const EMPTY_CART = {
+  items: [],
+  total: 0,
+  currency: 'EUR',
+} as const
+
 function installStub(responder: Responder): SentRequest[] {
   const sent: SentRequest[] = []
   http.defaults.adapter = async (config: InternalAxiosRequestConfig) => {
@@ -109,7 +119,7 @@ beforeEach(() => {
   clearTokens()
   setSessionExpiredHandler(null)
   localStorage.clear()
-  installStub(() => [200, {}])
+  installStub((url) => (url === '/cart' ? [200, EMPTY_CART] : [200, {}]))
 })
 
 describe('RequireAuth guard (LC-27)', () => {
@@ -138,10 +148,11 @@ describe('RequireAuth guard (LC-27)', () => {
   it('cartGuard_whenGuardedVisitorLogsIn_landsOnCartAgain', async () => {
     // LC-27 end to end: "anonymous opens the cart URL directly → redirected
     // to login; after logging in, the cart is available". The return path
-    // rode the router state from RequireAuth to LoginPage.
-    installStub((url) =>
-      url === '/auth/login' ? [200, TOKEN_PAIR] : [404, {}],
-    )
+    // rode the router state from RequireAuth to LoginPage. FE-15 turned the
+    // landing into a fetching page: the beforeEach default answers /cart
+    // with a real empty CartResponse (a fresh account's cart has no lines),
+    // so cart availability is proven through the real page, not a stub
+    // sentence.
     renderRoute('/cart')
 
     await fillCredentialsAndSubmit()
@@ -185,15 +196,23 @@ describe('LoginPage session-expired notice (LC-07)', () => {
     // LC-07's full client-side arc, through the ADR-011 handler chain:
     // guarded page → 401 → single-flight refresh rejected → store marked +
     // Layout's navigate lands on /login with the notice and the /cart
-    // return path → re-login replays it.
+    // return path → re-login replays it. FE-15's CartPage fetches on mount,
+    // so the replayed read must succeed — the first /cart 401 expires the
+    // session, the re-login's second read answers (401s after the fresh
+    // token would loop the guard straight back to the notice).
     setTokens({
       accessToken: 'expired-access',
       refreshToken: 'stale-refresh',
       user: TOKEN_PAIR.user,
     })
+    let cartReads = 0
     const sent = installStub((url) => {
       if (url === '/auth/refresh') return [401, { status: 401 }]
       if (url === '/auth/login') return [200, TOKEN_PAIR]
+      if (url === '/cart') {
+        cartReads += 1
+        return cartReads === 1 ? [401, { status: 401 }] : [200, EMPTY_CART]
+      }
       return [401, { status: 401 }]
     })
     renderRoute('/cart')

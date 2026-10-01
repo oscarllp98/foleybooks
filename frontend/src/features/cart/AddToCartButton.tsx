@@ -5,6 +5,7 @@ import { Link, useLocation } from 'react-router'
 import { addItem } from '../../api/orders'
 import { QuantitySelector } from '../../components/QuantitySelector'
 import { useAuth } from '../../hooks/useAuth'
+import { invalidateCart } from '../../hooks/useCart'
 import type { LoginRedirectState } from '../../types/routing'
 import { addItemRequestSchema } from '../../types/cart'
 import type { BookResponse } from '../../types/catalog'
@@ -80,7 +81,9 @@ export function AddToCartButton({ book }: AddToCartButtonProps) {
   const mutation = useMutation({
     mutationFn: addItem,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['cart'] })
+      // One cache: hooks/useCart owns the ['cart'] key (plan §1) — every
+      // mounted cart read refetches to the server's fresh truth.
+      invalidateCart(queryClient)
       setQuantity(1)
       setFeedback({ kind: 'added' })
     },

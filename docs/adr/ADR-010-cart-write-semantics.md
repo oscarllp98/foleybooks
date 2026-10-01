@@ -112,6 +112,12 @@ removal-semantics precedent.
 - **FE-15** can rely on: zero-removal always succeeding (flagged lines
   included), the 422 carrying `availableStock` to render, and a 404 on a
   vanished line meaning "refresh your stale view", not "you hit a bug".
+  The frontend's reading of this decision (delivered with FE-15): the
+  stepper's decrease-to-zero activation routes to **DELETE /cart/items/{bookId}
+  (FR-13's verb, idempotent 204)** rather than `PATCH {quantity: 0}` — the
+  two are equivalent per this ADR, DELETE is the verb that names the intent,
+  and its 204 carries no body, so the page refetches the server's fresh view
+  instead of trusting a locally computed one.
 - **Tests (plan §6).** `cart_update_aboveStock_rejectedWithAvailableStock`
   (LC-12/LC-16), `update_whenQuantityZero_removesTheLineAndAnswersTheEmptiedCart`
   and
