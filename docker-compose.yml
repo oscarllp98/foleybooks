@@ -145,6 +145,8 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${AUTH_DB_PASSWORD:?set in .env}
       SPRING_MAIL_HOST: ${SPRING_MAIL_HOST:-mailpit}
       SPRING_MAIL_PORT: ${SPRING_MAIL_PORT:-1025}
+      # Envelope sender (app.mail.from knob, ADR-001) — same default as .env.example.
+      SPRING_MAIL_FROM: ${SPRING_MAIL_FROM:-noreply@foleybooks.com}
     depends_on:
       auth-db:
         condition: service_healthy

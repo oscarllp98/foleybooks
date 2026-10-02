@@ -4,11 +4,14 @@ A portfolio-grade e-commerce bookstore: browse and search real book data, manage
 persistent personal cart, with production-quality security, validation, and tests —
 built as **Spring Boot 3.x microservices** with a **React + TypeScript** frontend.
 
-![CI](https://github.com/oscarllp98/foleybooks/actions/workflows/ci.yml/badge.svg)
+![CI (main)](https://github.com/oscarllp98/foleybooks/actions/workflows/ci.yml/badge.svg)
+![CI (develop)](https://github.com/oscarllp98/foleybooks/actions/workflows/ci.yml/badge.svg?branch=develop)
 
-> **Status:** under construction — Phase 0 (platform bootstrap) is complete; the MVP
-> (auth → catalog → cart) is being implemented per the approved Spec 001. Sections
-> below describe the target product; features light up as their specs land.
+> **Status:** Spec 001 MVP is delivered — email-confirm auth (RS256 JWT, refresh-token
+> rotation with reuse detection), catalog browse/search/filter, and a persistent
+> per-user cart, all reachable through one gateway behind a single `docker compose up`.
+> Every backend module carries ≥ 80% JaCoCo line coverage; integration tests run on
+> Testcontainers PostgreSQL.
 
 ## Architecture
 
@@ -50,8 +53,15 @@ Copy-Item .env.example .env      # then set the placeholder secrets
 #    databases stay network-internal per C27)
 docker compose up -d --build
 
-# 3. Frontend dev server (the SPA calls the gateway at http://localhost:8080/api/v1)
-cd frontend; npm install; npm run dev
+# 3. Smoke: the seeded catalog answers through the gateway
+Invoke-RestMethod http://localhost:8080/api/v1/books?size=1 |
+    ForEach-Object { $_.page.totalElements }                      # -> 12
+
+# 4. Frontend dev server (the SPA calls the gateway at http://localhost:8080/api/v1)
+cd frontend
+Copy-Item .env.example .env.local   # VITE_API_BASE_URL, fine as-is for local dev
+npm install
+npm run dev                           # open http://localhost:5173
 ```
 
 Verification gates:
@@ -63,26 +73,32 @@ cd frontend; npm run lint; npm test; npm run build   # three exit-0 gates
 
 ## Demo accounts
 
-Portfolio-friendly demo credentials (seeded via Flyway once the auth service ships):
+Portfolio-friendly demo credentials, seeded via Flyway and **already verified** — log in
+with either one straight away (email confirmation is only required for self-registered
+accounts):
 
-| Role    | Email                     | Password       |
-| ------- | ------------------------- | -------------- |
-| Admin   | `admin@foleybooks.com`    | `Admin@1234`   |
-| Customer| `customer@foleybooks.com` | `Customer@1234`|
+| Role     | Email                     | Password         |
+| -------- | ------------------------- | ---------------- |
+| Admin    | `admin@foleybooks.com`    | `Admin@1234`     |
+| Customer | `customer@foleybooks.com` | `Customer@1234`  |
 
-Email confirmation during local dev lands in [Mailpit](http://localhost:8025), a
-disposable in-container inbox — no real email is ever sent.
+New registrations send their confirmation link to [Mailpit](http://localhost:8025), a
+disposable in-container inbox — no real email is ever sent in local dev.
 
-Book cover images are hotlinked from the
-[Open Library Covers API](https://openlibrary.org/developers/api#Cover_api) by ISBN,
-with an offline placeholder fallback.
+## Book cover attribution
+
+Cover images are hotlinked by ISBN from the
+[Open Library Covers API](https://openlibrary.org/developers/api#Cover_api), a project
+of the Internet Archive; artwork remains © the respective publishers. If a cover fails
+to load, the UI falls back to a styled placeholder with descriptive alt text — broken
+image icons never reach the user.
 
 ## Roadmap
 
-- **Spec 001 — MVP**: register/confirm/login, catalog browse/search/filter,
-  persistent cart
-- Later specs (orders, admin catalog management, payments) are intentionally out of
-  the MVP slice.
+- **Spec 001 — MVP (delivered)**: register/confirm/login/refresh/logout, catalog
+  browse/search/filter, persistent per-user cart
+- Later specs (orders & checkout, admin catalog management, payments) are intentionally
+  out of the MVP slice.
 
 ## Documentation
 
