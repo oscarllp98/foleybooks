@@ -1,0 +1,610 @@
+package com.foleybooks.catalog.book.api;
+
+import static org.hamcrest.Matchers.matchesPattern;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.foleybooks.catalog.book.service.BookNotFoundException;
+import com.foleybooks.catalog.book.service.BookService;
+import com.foleybooks.catalog.category.api.CategoryResponse;
+import com.foleybooks.catalog.common.PageEnvelope;
+import com.foleybooks.catalog.common.PageMeta;
+import com.foleybooks.catalog.common.ProblemDetailResponder;
+import com.foleybooks.catalog.config.SecurityConfig;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.UUID;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+
+/**
+ * Wire contract of GET /api/v1/books (FR-06, FR-08, plan §6.2): the real
+ * SecurityConfig runs in-slice — security is never disabled (C25) — so the
+ * anonymous 200 below doubles as the proof of the catalog GET's spot on the
+ * public allowlist (C22), and {@link #pagination_malformed_rejected} — the
+ * plan §6.1 entry, discharged here because a binder failure needs the real
+ * MVC stack — proves LC-28 rides the binder + shared advice path (D-15), not
+ * hand-rolled checks. The {@link BookSortConverter} is loaded in-slice (Spring
+ * Boot registers {@code Converter} beans with the MVC conversion service, and
+ * {@code @WebMvcTest} includes them), so the CA-07 sort whitelist is exercised
+ * through the real binding path too: valid {@code field,direction} values are
+ * forwarded as a parsed {@link BookSort}, and every value off the whitelist is
+ * a 400 before the service is touched. What the binder hands over verbatim
+ * (including out-of-range numbers) and what the envelope must look like are
+ * asserted here; the clamping itself (LC-11) is the service's rule, proven in
+ * {@code BookServiceImplTest}.
+ *
+ * <p>CA-08's two filter parameters (FR-08, FR-09, D-06) get the same boundary
+ * treatment everything else in this slice does, per C23: the controller trims
+ * {@code search} and reads a blank result as "no filter" before delegating —
+ * the way {@code EmailNormalizingDeserializer} and {@link BookSortConverter}
+ * already treat auth's email and this endpoint's sort — while case-folding and
+ * LIKE metacharacter escaping are the repository's rule, proven against real
+ * PostgreSQL in {@code BookRepositoryTest}, not here. A blank search, like a
+ * blank sort, is "not specified", never an error; a search longer than the
+ * widest field it could ever match is a validation rejection (LC-28's "extremely
+ * long query strings" clause, newly reachable now that this endpoint takes free
+ * text at all) and never reaches the service; and a malformed {@code categoryId}
+ * rides the same shared 400 path as a malformed {@code page} (LC-28).
+ *
+ * <p>CA-09's {@code GET /books/{id}} (FR-07) is asserted by the same rules: an
+ * anonymous 200 carrying every FR-07 field of the plan §2 shape, a 404 ProblemDetail
+ * rendered by the real advice when the service reports no such book, and a
+ * malformed id rejected by the binder before the service is touched — the path
+ * variable version of the page/size/sort/categoryId asymmetry above.
+ *
+ * <p>CA-11's {@code GET /books/batch?ids=} (D-10, FR-11) gets the identical
+ * binder treatment on a query parameter — a malformed id is the shared 400 (field
+ * {@code ids}), an oversized list is a {@code @Size} 400 — but the opposite
+ * not-found rule (LC-14): a well-formed id naming no book yields a 200 with the
+ * present subset, never a 404, so the controller's only job is to hand the parsed
+ * ids to the service and serve the bare {@code [BookResponse]} array back. The
+ * anonymous 200 also proves the literal {@code /batch} segment resolves before
+ * the {@code /{id}} variable, and that the route is public on the GET allowlist
+ * (C22, C25).
+ */
+@WebMvcTest(BookController.class)
+@Import({SecurityConfig.class, ProblemDetailResponder.class, BookSortConverter.class})
+class BookControllerTest {
+
+    private static final UUID CLEAN_CODE_ID = UUID.fromString("00000000-0000-0000-0000-00000000cb06");
+    private static final UUID TECHNOLOGY_ID = UUID.fromString("00000000-0000-0000-0000-00000000ca02");
+    private static final UUID UNKNOWN_ID = UUID.fromString("00000000-0000-0000-0000-00000000cb99");
+
+    private static final BookResponse CLEAN_CODE = new BookResponse(
+            CLEAN_CODE_ID, "Clean Code", "Robert C. Martin", "9780132350884",
+            new BigDecimal("31.99"), "https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg",
+            Availability.IN_STOCK, 12, new CategoryResponse(TECHNOLOGY_ID, "Technology"));
+
+    private static final PageEnvelope<BookResponse> ONE_BOOK =
+            new PageEnvelope<>(List.of(CLEAN_CODE), new PageMeta(12, 1, 0, BookService.DEFAULT_SIZE));
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockitoBean
+    private BookService bookService;
+
+    @MockitoBean
+    private JwtDecoder jwtDecoder;
+
+    @Test
+    void listBooks_whenRequestedAnonymously_responds200WithPlanContractEnvelope() throws Exception {
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, null, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.content[0].id").value(CLEAN_CODE_ID.toString()))
+                .andExpect(jsonPath("$.content[0].title").value("Clean Code"))
+                .andExpect(jsonPath("$.content[0].author").value("Robert C. Martin"))
+                .andExpect(jsonPath("$.content[0].isbn").value("9780132350884"))
+                // D-08: price is a JSON number, exact at scale 2.
+                .andExpect(jsonPath("$.content[0].price").value(31.99))
+                .andExpect(jsonPath("$.content[0].coverUrl")
+                        .value("https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg"))
+                .andExpect(jsonPath("$.content[0].availability").value("IN_STOCK"))
+                .andExpect(jsonPath("$.content[0].stockQuantity").value(12))
+                .andExpect(jsonPath("$.content[0].category.id").value(TECHNOLOGY_ID.toString()))
+                .andExpect(jsonPath("$.content[0].category.name").value("Technology"))
+                .andExpect(jsonPath("$.page.totalElements").value(12))
+                .andExpect(jsonPath("$.page.totalPages").value(1))
+                .andExpect(jsonPath("$.page.number").value(0))
+                .andExpect(jsonPath("$.page.size").value(BookService.DEFAULT_SIZE));
+
+        // The omitted-parameter defaults of AGENTS.md §6 are the binder's, not
+        // the service's — the controller arrives at (0, 20) with no sort and no
+        // filter before delegating, so the service applies the FR-06
+        // title-ascending default.
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, null, null);
+    }
+
+    @Test
+    void listBooks_whenNumericParamsOutOfRange_delegatesThemVerbatimForClamping() throws Exception {
+        // LC-11 vs LC-28 asymmetry at the boundary: numeric-but-out-of-range is
+        // not a rejection, it is a clamp the service owns — so these values
+        // must pass through the controller untouched.
+        when(bookService.listBooks(-2, 500, null, null, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("page", "-2").param("size", "500"))
+                .andExpect(status().isOk());
+
+        verify(bookService).listBooks(-2, 500, null, null, null);
+    }
+
+    @Test
+    void listBooks_whenEmptyCatalog_responds200WithEmptyEnvelope() throws Exception {
+        // FR-06: nothing to show is a state, never an error.
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, null, null))
+                .thenReturn(new PageEnvelope<>(List.of(), new PageMeta(0, 0, 0, BookService.DEFAULT_SIZE)));
+
+        mockMvc.perform(get("/api/v1/books"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page.totalElements").value(0))
+                .andExpect(jsonPath("$.page.number").value(0));
+    }
+
+    @ParameterizedTest(name = "pagination_malformed_rejected: {0}={1} is a 400, not a clamp (LC-28)")
+    @CsvSource({
+            "page, abc",
+            "page, 99999999999999",
+            "size, two",
+            "size, 2.5"
+    })
+    void pagination_malformed_rejected(String parameter, String value) throws Exception {
+        // LC-28: non-numeric page/size — including digit strings no int can
+        // hold and the fractional 2.5 — are validation errors, never silently
+        // coerced or clamped (only representable integers clamp, LC-11).
+        mockMvc.perform(get("/api/v1/books").param(parameter, value))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value(parameter))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @ParameterizedTest(name = "sort_whitelisted: sort={0} resolves to {1}/{2} (FR-06, CA-07)")
+    @CsvSource(delimiterString = ";", value = {
+            "title; TITLE; ASC",
+            "price; PRICE; ASC",
+            "title,asc; TITLE; ASC",
+            "price,desc; PRICE; DESC",
+            "Price,DESC; PRICE; DESC",
+            "' PRICE , ASC '; PRICE; ASC"
+    })
+    void listBooks_whenSortIsWhitelisted_forwardsParsedSelection(String rawSort,
+            BookSort.Field field, BookSort.Direction direction) throws Exception {
+        // The whitelist is a converter, not a service rule: a valid selection
+        // reaches the service already parsed and normalized, and the request is
+        // served normally (200), never rejected. Case and padding are trimmed.
+        BookSort expected = new BookSort(field, direction);
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, expected, null, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("sort", rawSort))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].title").value("Clean Code"));
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, expected, null, null);
+    }
+
+    @Test
+    void listBooks_whenSortIsBlank_fallsBackToTheServiceDefault() throws Exception {
+        // A blank sort (sort=) is "not specified", not an error: the converter
+        // yields null and the FR-06 title-ascending default still applies.
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, null, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("sort", ""))
+                .andExpect(status().isOk());
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, null, null);
+    }
+
+    @ParameterizedTest(name = "sort_whitelist_rejected: sort={0} is a 400 validation error (LC-28, CA-07)")
+    @ValueSource(strings = {
+            "rating",
+            "author",
+            "isbn",
+            "id",
+            "stockQuantity",
+            "createdAt",
+            "title,bogus",
+            "price,ascending",
+            "price,",
+            ",asc",
+            "title,asc,desc",
+            "' OR 1=1--",
+            "; drop table books"
+    })
+    void sort_unknownSelection_rejectedWith400Validation(String rawSort) throws Exception {
+        // CA-07's security value: only title/price asc/desc exist. An unknown
+        // field or direction is a boundary rejection — the same 400 validation
+        // ProblemDetail (field "sort", "has an invalid value") as a malformed
+        // page/size — before the query is built, so a bogus column can never
+        // reach JPA as a 500 or hint at the schema (LC-28, D-06).
+        mockMvc.perform(get("/api/v1/books").param("sort", rawSort))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("sort"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @Test
+    void listBooks_whenSearchIsProvided_forwardsTheTrimmedTerm() throws Exception {
+        // CA-08 / FR-08, C23: the boundary trims the caller's padding before
+        // delegating — auth's EmailNormalizingDeserializer and CA-07's
+        // BookSortConverter already set this precedent for their own parameters
+        // — so the service never sees stray whitespace. What the repository
+        // still owns (case-folding, LIKE escaping) is not this layer's business.
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, "clean code", null))
+                .thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("search", "  clean code  "))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].title").value("Clean Code"));
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, "clean code", null);
+    }
+
+    @Test
+    void listBooks_whenSearchIsBlank_forwardsNoFilterAtAll() throws Exception {
+        // Mirrors the blank-sort rule: an empty or whitespace-only search is
+        // normalized to "no filter" here, at the boundary — the service never
+        // sees the blank itself, and it is never an error or a literal search
+        // for whitespace.
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, null, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("search", "   "))
+                .andExpect(status().isOk());
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, null, null);
+    }
+
+    @Test
+    void listBooks_whenSearchMatchesNothing_responds200WithEmptyEnvelope() throws Exception {
+        // FR-08, LC-10: "No matches" is a state, never an error — the same
+        // envelope shape as an empty catalog, just reached through a filter.
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, "zzzznotabook", null))
+                .thenReturn(new PageEnvelope<>(List.of(), new PageMeta(0, 0, 0, BookService.DEFAULT_SIZE)));
+
+        mockMvc.perform(get("/api/v1/books").param("search", "zzzznotabook"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page.totalElements").value(0));
+    }
+
+    @Test
+    void listBooks_whenCategoryIdIsValid_forwardsTheParsedUuid() throws Exception {
+        // FR-09: a category browse is an exact id the repository compares; the
+        // binder parses "00000000-…-ca02" straight into a UUID with no custom
+        // converter needed (unlike sort, which is a grammar, not a type).
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, null, TECHNOLOGY_ID)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("categoryId", TECHNOLOGY_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].category.id").value(TECHNOLOGY_ID.toString()));
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, null, TECHNOLOGY_ID);
+    }
+
+    @Test
+    void listBooks_whenSearchAndCategoryIdAreCombined_forwardsBoth() throws Exception {
+        // FR-08, D-06: the two filters compose — the controller forwards both
+        // untouched and the AND lives in the repository layer.
+        BookSort sort = new BookSort(BookSort.Field.PRICE, BookSort.Direction.DESC);
+        when(bookService.listBooks(1, 5, sort, "the", TECHNOLOGY_ID)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books")
+                        .param("page", "1")
+                        .param("size", "5")
+                        .param("sort", "price,desc")
+                        .param("search", "the")
+                        .param("categoryId", TECHNOLOGY_ID.toString()))
+                .andExpect(status().isOk());
+
+        verify(bookService).listBooks(1, 5, sort, "the", TECHNOLOGY_ID);
+    }
+
+    @ParameterizedTest(name = "categoryId_malformed_rejected: categoryId={0} is a 400 validation error (LC-28)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "00000000-0000-0000-0000-00000000ca0z"})
+    void categoryId_malformed_rejectedWith400Validation(String rawCategoryId) throws Exception {
+        // Same binder-failure path as a malformed page/size/sort (D-06, LC-28):
+        // an unparseable id is a validation error before the service is touched,
+        // distinct from a well-formed id that simply matches no category — that
+        // one is an empty page (FR-09, LC-31), proven at the repository layer.
+        mockMvc.perform(get("/api/v1/books").param("categoryId", rawCategoryId))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("categoryId"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @Test
+    void listBooks_whenSearchIsTooLong_rejectedWith400Validation() throws Exception {
+        // LC-28's "extremely long query strings" clause, newly reachable because
+        // CA-08 is the first free-text query parameter this service takes: a term
+        // longer than the widest title/author column (ADR-003) cannot match
+        // anything, so it is refused as a validation error before the service —
+        // and the database — ever see it, the same shared 400 path a bad page,
+        // size, sort, or categoryId earns.
+        mockMvc.perform(get("/api/v1/books").param("search", "a".repeat(BookController.MAX_SEARCH_LENGTH + 1)))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("search"))
+                .andExpect(jsonPath("$.errors[0].message").value("must be at most 300 characters"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @Test
+    void listBooks_whenSearchIsExactlyAtTheLimit_isAccepted() throws Exception {
+        // The cap rejects longer-than-useful, not "long" — a term exactly as wide
+        // as the title column is still a possible match and must sail through.
+        String atLimit = "a".repeat(BookController.MAX_SEARCH_LENGTH);
+        when(bookService.listBooks(0, BookService.DEFAULT_SIZE, null, atLimit, null)).thenReturn(ONE_BOOK);
+
+        mockMvc.perform(get("/api/v1/books").param("search", atLimit))
+                .andExpect(status().isOk());
+
+        verify(bookService).listBooks(0, BookService.DEFAULT_SIZE, null, atLimit, null);
+    }
+
+    // ------------------------------------------------------------------ CA-09: GET /books/{id}
+
+    @Test
+    void getBook_whenRequestedAnonymously_responds200WithEveryFr07Field() throws Exception {
+        // FR-07's detail, and the anonymous 200 is again the proof of the spot on
+        // the public allowlist (C22): GET /api/v1/books/** needs no token, and the
+        // real SecurityConfig runs in-slice (C25). The field list is the FR-07
+        // promise — title, ISBN, author, price, cover, category, availability —
+        // and, per ADR-009, literally the same BookResponse shape the list above
+        // publishes, so a card and the page it links to cannot drift.
+        when(bookService.getBook(CLEAN_CODE_ID)).thenReturn(CLEAN_CODE);
+
+        mockMvc.perform(get("/api/v1/books/{id}", CLEAN_CODE_ID))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.id").value(CLEAN_CODE_ID.toString()))
+                .andExpect(jsonPath("$.title").value("Clean Code"))
+                .andExpect(jsonPath("$.author").value("Robert C. Martin"))
+                .andExpect(jsonPath("$.isbn").value("9780132350884"))
+                .andExpect(jsonPath("$.price").value(31.99))
+                .andExpect(jsonPath("$.coverUrl")
+                        .value("https://covers.openlibrary.org/b/isbn/9780132350884-L.jpg"))
+                .andExpect(jsonPath("$.availability").value("IN_STOCK"))
+                .andExpect(jsonPath("$.stockQuantity").value(12))
+                .andExpect(jsonPath("$.category.id").value(TECHNOLOGY_ID.toString()))
+                .andExpect(jsonPath("$.category.name").value("Technology"))
+                // Nothing but the reviewed contract crosses the boundary (C9).
+                .andExpect(jsonPath("$.createdAt").doesNotExist())
+                .andExpect(jsonPath("$.updatedAt").doesNotExist());
+
+        verify(bookService).getBook(CLEAN_CODE_ID);
+    }
+
+    @Test
+    void getBook_whenIdMatchesNoBook_responds404ProblemDetailWithThePublishedUrn() throws Exception {
+        // Plan §6.2's "detail 200/404 (FR-07)": the unknown half is the shared
+        // advice's job (D-15), so the real GlobalExceptionHandler renders the
+        // service's BookNotFoundException as an RFC 7807 body — declared URN,
+        // request path as instance, the echoed bookId property and a traceId —
+        // with no HTML error page and no stack detail anywhere in it.
+        when(bookService.getBook(UNKNOWN_ID)).thenThrow(BookNotFoundException.forId(UNKNOWN_ID));
+
+        mockMvc.perform(get("/api/v1/books/{id}", UNKNOWN_ID))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:book-not-found"))
+                .andExpect(jsonPath("$.title").value("Book not found"))
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.detail").value("No book exists with the given id."))
+                .andExpect(jsonPath("$.bookId").value(UNKNOWN_ID.toString()))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/" + UNKNOWN_ID))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verify(bookService).getBook(UNKNOWN_ID);
+    }
+
+    @ParameterizedTest(name = "bookId_malformed_rejected: id={0} is a 400 validation error (LC-28)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "00000000-0000-0000-0000-00000000cb0z",
+            "' OR 1=1--"})
+    void bookId_malformed_rejectedWith400Validation(String rawId) throws Exception {
+        // LC-28's asymmetry, now on a path variable instead of a query parameter:
+        // an id Spring cannot parse is a validation error at the boundary — the
+        // same shared 400 a bad page, size, sort or categoryId earns — while a
+        // well-formed id that names no book is a 404 (test above). Deciding that
+        // by hand would be business logic in the controller (C8); the binder owns it.
+        mockMvc.perform(get("/api/v1/books/{id}", rawId))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("id"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    // ------------------------------------------------------------------ CA-11: GET /books/batch (D-10, FR-11)
+
+    @Test
+    void getBooks_whenRequestedAnonymously_responds200WithABareBookResponseArray() throws Exception {
+        // Plan §2 publishes the batch as a top-level [BookResponse] (no pagination
+        // envelope — it is a keyed lookup, not a browsed page), and the anonymous
+        // 200 is the public-allowlist proof for this path (C22, GET /api/v1/books/**)
+        // with the real SecurityConfig running in-slice (C25). Reaching /books/batch
+        // here and getting 200 rather than a 400 on id="batch" is also the proof
+        // that Spring resolves the literal segment before the {id} variable, so the
+        // batch handler — not the detail handler — serves the route.
+        when(bookService.getBooks(List.of(CLEAN_CODE_ID))).thenReturn(List.of(CLEAN_CODE));
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", CLEAN_CODE_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(1))
+                // The ADR-009 shape, identical to the list/detail record, so an
+                // enriched cart line cannot disagree with the catalog card: the
+                // derived badge, the exact EUR number (D-08) and the embedded
+                // category all travel through.
+                .andExpect(jsonPath("$[0].id").value(CLEAN_CODE_ID.toString()))
+                .andExpect(jsonPath("$[0].title").value("Clean Code"))
+                .andExpect(jsonPath("$[0].price").value(31.99))
+                .andExpect(jsonPath("$[0].availability").value("IN_STOCK"))
+                .andExpect(jsonPath("$[0].stockQuantity").value(12))
+                .andExpect(jsonPath("$[0].category.name").value("Technology"));
+
+        verify(bookService).getBooks(List.of(CLEAN_CODE_ID));
+    }
+
+    @Test
+    void getBooks_whenIdsGivenAsRepeatedParams_forwardsEveryParsedUuid() throws Exception {
+        // The east-west call D-10 designs for arrives as repeated ?ids=…&ids=…
+        // (how the order-service's Feign client serializes a collection); Spring
+        // binds each value through its own String -> UUID conversion, so a legal
+        // multi-id request reaches the service as a fully parsed list, in order.
+        when(bookService.getBooks(List.of(CLEAN_CODE_ID, TECHNOLOGY_ID))).thenReturn(List.of(CLEAN_CODE));
+
+        mockMvc.perform(get("/api/v1/books/batch")
+                        .param("ids", CLEAN_CODE_ID.toString())
+                        .param("ids", TECHNOLOGY_ID.toString()))
+                .andExpect(status().isOk());
+
+        verify(bookService).getBooks(List.of(CLEAN_CODE_ID, TECHNOLOGY_ID));
+    }
+
+    @Test
+    void getBooks_whenAnIdMatchesNoBook_responds200WithThePresentSubsetNotA404() throws Exception {
+        // CA-11's contract inverted against getBook's 404 (LC-14): a well-formed
+        // id that names no book is an absent array entry, and the caller reads the
+        // gap. The controller contributes no 404 path here — it delegates and
+        // serves whatever the batch returned — which is what keeps a single dead
+        // cart line from failing the whole enrichment read.
+        when(bookService.getBooks(List.of(UNKNOWN_ID))).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", UNKNOWN_ID.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(List.of(UNKNOWN_ID));
+    }
+
+    @Test
+    void getBooks_whenNoIdsGiven_responds200WithAnEmptyArray() throws Exception {
+        // FR-11's empty cart: an ABSENT ids parameter is a valid empty lookup, never
+        // a 400 "ids is required". required=false binds it to null and the service
+        // answers [] — asserted by delegating, the boundary itself adds no rule (C8).
+        // Note this is the *absent* case only; a *present-but-blank* ?ids= is a
+        // malformed value (next test), the two are deliberately not conflated.
+        when(bookService.getBooks(null)).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(null);
+    }
+
+    @Test
+    void getBooks_whenIdsAreBlank_responds200WithAnEmptyArray() throws Exception {
+        // A present-but-blank ?ids= is NOT the same as a malformed id. Spring's
+        // RequestParamMethodArgumentResolver collapses a single value String[] to a
+        // String, and the String -> List<UUID> conversion goes through
+        // StringToCollectionConverter, whose comma-split drops the empty token — so
+        // ?ids= binds to an EMPTY list (getBooks([])), not a [""] that would fail
+        // UUID parsing. Distinct from an ABSENT ?ids= (null, prior test) and from a
+        // non-blank unparseable id (a real TypeMismatch 400, later). The service
+        // short-circuit answers [] for the empty list, so both no-ids shapes are an
+        // empty 200 (FR-11's empty cart), never a 400 "ids is required".
+        when(bookService.getBooks(List.of())).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", ""))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        verify(bookService).getBooks(List.of());
+    }
+
+    @ParameterizedTest(name = "batchIds_malformed_rejected: ids={0} is a 400 validation error (LC-28)")
+    @ValueSource(strings = {"not-a-uuid", "00000000-0000-0000-0000", "00000000-0000-0000-0000-00000000cb0z"})
+    void batchIds_malformed_rejectedWith400Validation(String rawIds) throws Exception {
+        // The same String -> UUID binder that 400s a malformed path id, applied to
+        // a batch element (C23, LC-28): an unparseable id never reaches the
+        // service — the shared advice renders the 400 with field "ids". This is
+        // deliberately distinct from a well-formed id that names no book, which is
+        // an absent entry and a 200 (test above), not a rejection.
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", rawIds))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("ids"))
+                .andExpect(jsonPath("$.errors[0].message").value("has an invalid value"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/batch"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+
+    @Test
+    void getBooks_whenTooManyIdsRequested_rejectedWith400Validation() throws Exception {
+        // LC-28's "extremely long query strings" bound for the batch, capped at the
+        // same MAX_SIZE ceiling that bounds a page so one enrichment read never
+        // outgrows a browsed page (NFR-02). A list one over the cap is refused at
+        // the boundary before the catalog is touched — distinct from a clamped
+        // page/size, because there is no "clamp" semantics for which specific books
+        // a cart asked for, so an oversized batch is a caller bug, not a browse.
+        String ids = String.join(",", java.util.Collections.nCopies(BookService.MAX_SIZE + 1,
+                CLEAN_CODE_ID.toString()));
+
+        mockMvc.perform(get("/api/v1/books/batch").param("ids", ids))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("urn:foley-books:problem:validation"))
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.errors[0].field").value("ids"))
+                .andExpect(jsonPath("$.errors[0].message").value("must request at most 100 ids"))
+                .andExpect(jsonPath("$.instance").value("/api/v1/books/batch"))
+                .andExpect(jsonPath("$.traceId", matchesPattern("[0-9a-f]{8}")));
+
+        verifyNoInteractions(bookService);
+    }
+}
